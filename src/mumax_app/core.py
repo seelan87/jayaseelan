@@ -3835,7 +3835,7 @@ class MumaxGPUScene:
             prop.SetSpecularColor(*(to_rgb(plane['record']['color']) if finish['metal'] and plane['record']['mode']=='Solid color' else (1.,1.,1.)))
 
     def render(self,artist,width,height,matrix,box,tile=None,prepared=False):
-        from vtk.util.numpy_support import vtk_to_numpy
+        from vtkmodules.util.numpy_support import vtk_to_numpy
         if not prepared:self.prepare(artist)
         if getattr(artist,'light_settings',None) is not None:
             lighting=artist_lighting(artist)

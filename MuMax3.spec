@@ -23,7 +23,7 @@ a = Analysis([str(project/'launcher.py')], pathex=[str(project/'src')],
              hookspath=[], hooksconfig={'matplotlib': {'backends': ['TkAgg', 'Agg']}},
              runtime_hooks=[], excludes=['IPython','jupyter','notebook','jupyterlab',
                  'PyQt5','PyQt6','PySide2','PySide6','wx','pytest',
-                 'numba.tests','llvmlite.tests','vtkmodules.qt','pyvista.jupyter'],
+                 'numba.tests','llvmlite.tests','vtkmodules.qt'],
              noarchive=False)
 pyz = PYZ(a.pure)
 options = dict(name=name, debug=False, bootloader_ignore_signals=False,
