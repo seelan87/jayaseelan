@@ -1,0 +1,10 @@
+# Versions verified with the current four-tab application on Python 3.12 x64.
+numpy==2.1.0
+Pillow==10.4.0
+opencv-python==5.0.0.93
+matplotlib==3.9.2
+pyvista==0.49.1
+vtk==9.7.1
+scipy==1.14.1
+numba==0.68.0
+llvmlite==0.50.0
