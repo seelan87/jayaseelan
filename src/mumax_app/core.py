@@ -1093,17 +1093,19 @@ LAYER_FILL_PASTEL_COLORS = {
     'White':'#ffffff', 'Gray':'#9e9e9e', 'Charcoal':'#222222'}
 LAYER_FILL_COLORS = {**LAYER_FILL_BASIC_COLORS,**LAYER_FILL_PASTEL_COLORS}
 LAYER_FILL_PALETTES = {'Paint 3D style':LAYER_FILL_BASIC_COLORS,'Pastels':LAYER_FILL_PASTEL_COLORS}
-# Phong approximations of the four Paint 3D finishes; no external app required.
+# Phong finishes shared by the CPU and GPU layer renderers.
 LAYER_FILL_FINISHES = {
     'Matte':dict(diffuse=1.,specular=0.,power=8.,metal=False),
     'Gloss':dict(diffuse=.9,specular=.65,power=60.,metal=False),
     'Dull metal':dict(diffuse=.65,specular=.5,power=18.,metal=True),
-    'Polished metal':dict(diffuse=.4,specular=.95,power=110.,metal=True)}
+    'Polished metal':dict(diffuse=.4,specular=.95,power=110.,metal=True),
+    'Glass':dict(diffuse=.25,specular=1.,power=120.,metal=False)}
 
 
 def layer_finish_material(record,ambient):
     finish=LAYER_FILL_FINISHES.get(record.get('finish','Matte'),LAYER_FILL_FINISHES['Matte'])
     reflection=record.get('_reflection')
+    if reflection is not None and not reflection.get('enabled'):reflection=None
     return dict(lighting=True,ambient=ambient,diffuse=(1-ambient)*finish['diffuse'],
         specular=reflection_specular(reflection,'layer',ambient) if reflection is not None else (1-ambient)*finish['specular'],
         specular_power=reflection['sharpness'] if reflection is not None else finish['power'])
@@ -1133,6 +1135,7 @@ def shade_layer_fill(rgb,directions,record,ambient,normals=None,lighting=None):
     lambert=.1+.75*np.maximum(np.sum(normal*light,axis=1),0)+.15*np.maximum(np.sum(normal*secondary,axis=1),0)
     half=light-directions;half/=np.maximum(np.linalg.norm(half,axis=1)[:,None],1e-15)
     reflection=record.get('_reflection')
+    if reflection is not None and not reflection.get('enabled'):reflection=None
     power=reflection['sharpness'] if reflection is not None else finish['power']
     specular=reflection_specular(reflection,'layer',ambient) if reflection is not None else (1-ambient)*finish['specular']
     shine=np.maximum(np.sum(normal*half,axis=1),0)**power
@@ -1207,8 +1210,8 @@ class LayerFillControl(ttk.LabelFrame):
         box.pack(fill='x');box.bind('<<ComboboxSelected>>',self.commit);box.bind('<Return>',self.commit);box.bind('<FocusOut>',self.commit)
         self.opacity_frame=ttk.Frame(self.body);self.opacity_frame.pack(fill='x',pady=3)
         ttk.Label(self.opacity_frame,text='Finish (3D)').pack(anchor='w')
-        box=ttk.Combobox(self.opacity_frame,textvariable=self.finish,values=tuple(LAYER_FILL_FINISHES),state='readonly')
-        box.pack(fill='x',pady=(0,4));box.bind('<<ComboboxSelected>>',self.commit)
+        box=self.finish_choice=ttk.Combobox(self.opacity_frame,textvariable=self.finish,values=tuple(LAYER_FILL_FINISHES),state='readonly')
+        box.pack(fill='x',pady=(0,4));box.bind('<<ComboboxSelected>>',self.finish_changed)
         ttk.Label(self.opacity_frame,text='Transparency (%)').pack(anchor='w')
         row=ttk.Frame(self.opacity_frame);row.pack(fill='x')
         ttk.Scale(row,from_=0,to=100,variable=self.alpha_slider,command=self.slider_changed).pack(side='left',fill='x',expand=True)
@@ -1395,6 +1398,14 @@ class LayerFillControl(ttk.LabelFrame):
     def slider_changed(self,value):
         if self.loading or self.busy:return
         self.transparency.set(str(round(float(value))));self.commit()
+
+    def finish_changed(self,event=None):
+        if self.loading or self.busy or self.current is None:return
+        try:
+            if self.finish.get()=='Glass' and float(self.transparency.get())==0:
+                self.transparency.set('70')
+        except (ValueError,tk.TclError):pass
+        self.commit()
 
     def commit(self,event=None):
         if self.loading or self.busy or self.current is None:return False

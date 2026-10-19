@@ -80,6 +80,32 @@ def run_self_test(report_path, *, gpu=False):
                 assert hasattr(tab,'light_x_angle') and hasattr(tab,'arrow_reflection')
             assert len(app.color_box['values'])==len(core.STREAM_COLOR_MAPS)
             result['checks'].append('Tk and four complete tabs, ROI/layers, shared presets, lighting/reflection/transparency controls')
+            for tab in (app.cross_tab,app.stream_tab):
+                control=tab.layer_fill_control
+                assert 'Glass' in control.finish_choice['values']
+                control.sync_layers(mesh['z']);control.enabled.set(True)
+                control.records[0]['checked']=True
+                control.transparency.set('0');control.finish.set('Glass')
+                control.finish_choice.event_generate('<<ComboboxSelected>>')
+                record=control.snapshot()['layers'][0]
+                assert record['finish']=='Glass' and record['transparency']==70.
+                control.transparency.set('45')
+                control.finish_choice.event_generate('<<ComboboxSelected>>')
+                record=control.snapshot()['layers'][0]
+                assert record['transparency']==45.
+                planes=core.build_layer_fill_planes(vectors,mesh,mesh['z'],control.snapshot(),
+                    'mz','blue,white,red',(-1,1))
+                assert len(planes)==1 and np.isclose(planes[0]['opacity'],.55)
+                assert planes[0]['z_bounds'][1]>planes[0]['z_bounds'][0]
+                material=core.layer_finish_material(core.reflected_layer_record(record,core.REFLECTION_DEFAULTS),.3)
+                assert np.isclose(material['specular'],.7) and material['specular_power']==120.
+                actor=pv.Actor();core.apply_layer_finish(actor,record,.3)
+                assert np.isclose(actor.prop.specular,.7) and actor.prop.GetSpecularColor()==(1.,1.,1.)
+                override=core.reflected_layer_record(record,dict(core.REFLECTION_DEFAULTS,enabled=True,layer=20.,sharpness=35.))
+                assert np.isclose(core.layer_finish_material(override,.3)['specular'],.14)
+                assert core.layer_finish_material(override,.3)['specular_power']==35.
+                control.enabled.set(False)
+            result['checks'].append('Glass finish in both tabs, adjustable translucency, full layer thickness and material highlights')
             core.warm_mumax_renderer();deadline=time.monotonic()+90
             while core._MUMAX_WARMING and time.monotonic()<deadline:
                 root.update();time.sleep(.025)
@@ -94,6 +120,13 @@ def run_self_test(report_path, *, gpu=False):
             artist.reflection_settings['transparency']=50.
             assert artist.raster(120,90,ax.get_proj(),ax.bbox.frozen())[:,:,3].any()
             result['checks'].append('Numba/LLVM runtime compilation and CPU opaque/translucent 3D arrows')
+            glass_record=dict(index=0,mode='Solid color',color='#80cfff',finish='Glass',transparency=70.)
+            artist.fill_planes=[dict(index=0,z=0.,z_bounds=(-.2,.2),xy=(-.8,.8,-.8,.8),
+                rgba=np.array([[[128,207,255,255]]],np.uint8),uniform=True,opacity=.3,
+                record=core.reflected_layer_record(glass_record,core.REFLECTION_DEFAULTS))]
+            rgba=artist.raster(120,90,ax.get_proj(),ax.bbox.frozen())
+            assert np.count_nonzero((rgba[:,:,3]>0)&(rgba[:,:,3]<255))>50
+            result['checks'].append('CPU glass layer rendering with translucent arrows')
             if gpu:
                 artist.force_cpu=False
                 rgba=artist.raster(120,90,ax.get_proj(),ax.bbox.frozen());assert rgba[:,:,3].any()

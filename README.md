@@ -5,6 +5,12 @@ cross sections, 3D arrows/cuboids, streamlines, and isosurfaces. Includes shared
 ParaView color presets, ROI/upscaling, layer fills/merge sets, lighting,
 reflection/transparency, and PNG/MP4 export.
 
+Tabs 3 and 4 include **Layer Fill → Finish (3D) → Glass** for translucent layers
+with sharp white highlights. Use **Transparency (%)** to tune the selected layer
+or merge set. Choosing Glass on an opaque layer starts at 70% transparency;
+existing transparency settings are retained. This surface finish does not trace
+optical refraction.
+
 ## Download and run
 
 1. Open [the latest Windows release](https://github.com/seelan87/jayaseelan/releases/latest).
