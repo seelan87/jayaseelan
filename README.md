@@ -11,6 +11,12 @@ or merge set. Choosing Glass on an opaque layer starts at 70% transparency;
 existing transparency settings are retained. This surface finish does not trace
 optical refraction.
 
+Tabs 1, 3 and 4 use a single searchable **ParaView color preset** gallery.
+Tab 4's always-visible **3D view** selector offers 3D, XY, YZ and XZ camera
+orientations independently of the cross-section controls. In Tabs 3 and 4,
+**Layer Fill → Edge enable** outlines the selected layer or merge set, preserving
+holes and the outer shape without drawing internal cell or merged-layer seams.
+
 ## Download and run
 
 1. Open [the latest Windows release](https://github.com/seelan87/jayaseelan/releases/latest).

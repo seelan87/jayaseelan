@@ -78,7 +78,38 @@ def run_self_test(report_path, *, gpu=False):
             for tab in (app.cross_tab,app.stream_tab):
                 assert hasattr(tab,'layer_fill_control') and hasattr(tab,'arrow_transparency')
                 assert hasattr(tab,'light_x_angle') and hasattr(tab,'arrow_reflection')
-            assert len(app.color_box['values'])==len(core.STREAM_COLOR_MAPS)
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+            for owner,parent,open_picker in ((app,app.ovf_tab,app.choose_tab1_color_preset),
+                    (app.cross_tab,app.cross_tab.controls,app.cross_tab.choose_color_preset),
+                    (app.stream_tab,app.stream_tab.controls,app.stream_tab.choose_color_preset)):
+                assert not any(isinstance(w,core.ttk.Combobox) and str(w.cget('textvariable'))==str(owner.colors)
+                    for w in descendants(parent))
+                open_picker()
+                picker=getattr(owner,'preset_picker',None) if owner is app.stream_tab else owner.color_preset_picker
+                assert set(picker.names)==set(core.PARAVIEW_COLOR_PRESETS)
+                picker.tree.selection_set('Cool to Warm');picker.apply_selected()
+                assert owner.colors.get()=='Cool to Warm'
+            stream=app.stream_tab
+            assert stream.view_3d_group not in stream.section_groups and stream.view_3d_group.winfo_manager()=='pack'
+            assert not any(isinstance(w,core.ttk.Combobox) and str(w.cget('textvariable'))==str(stream.camera_mode)
+                for group in stream.section_groups for w in descendants(group))
+            calls=[]
+            class CameraProbe:
+                def __getattr__(self,name):return lambda:calls.append(name)
+            stream.plotter=CameraProbe()
+            try:
+                for section in (False,True):
+                    stream.cross_section_enabled.set(section)
+                    for view in ('XY','YZ','XZ','3D'):
+                        stream.volume_view.set(view);stream.volume_view_changed();calls.clear();stream.camera_default()
+                        assert calls[0]=={'XY':'view_xy','YZ':'view_yz','XZ':'view_xz','3D':'view_isometric'}[view]
+                        assert stream.camera_mode.get()=='3D'
+            finally:
+                stream.plotter=None;stream.cross_section_enabled.set(False);stream.camera_mode.set('3D')
+            result['checks'].append('ParaView-only preset pickers in Tabs 1/3/4 and independent XY/YZ/XZ/3D camera controls')
             result['checks'].append('Tk and four complete tabs, ROI/layers, shared presets, lighting/reflection/transparency controls')
             for tab in (app.cross_tab,app.stream_tab):
                 control=tab.layer_fill_control
@@ -93,6 +124,8 @@ def run_self_test(report_path, *, gpu=False):
                 control.finish_choice.event_generate('<<ComboboxSelected>>')
                 record=control.snapshot()['layers'][0]
                 assert record['transparency']==45.
+                control.edges.set(True);control.commit();record=control.snapshot()['layers'][0]
+                assert record['edges']
                 planes=core.build_layer_fill_planes(vectors,mesh,mesh['z'],control.snapshot(),
                     'mz','blue,white,red',(-1,1))
                 assert len(planes)==1 and np.isclose(planes[0]['opacity'],.55)
@@ -106,6 +139,18 @@ def run_self_test(report_path, *, gpu=False):
                 assert core.layer_finish_material(override,.3)['specular_power']==35.
                 control.enabled.set(False)
             result['checks'].append('Glass finish in both tabs, adjustable translucency, full layer thickness and material highlights')
+            slab=dict(index=0,z=.5,z_bounds=(0.,1.),xy=(0.,1.,0.,1.),rgba=np.array([[[100,150,200,255]]],np.uint8),
+                uniform=True,opacity=.3,record=dict(mode='Solid color',color='#6496c8',finish='Glass',edges=True))
+            assert len(core.layer_fill_edge_segments(slab))==12
+            assert core.vtk_layer_fill_edges(slab).n_lines==12
+            assert core.vtk_layer_fill_edges(slab).n_verts==0
+            merged=core.merge_layer_fill_planes([slab,dict(slab,index=1,z=1.5,z_bounds=(1.,2.))])
+            assert len(merged)==1 and len(core.layer_fill_edge_segments(merged[0]))==12
+            assert not np.any(np.all(np.isclose(core.layer_fill_edge_segments(merged[0])[:,:,2],1.),axis=1))
+            perforated=np.full((3,3,4),255,np.uint8);perforated[1,1,3]=0
+            hole=core.layer_fill_edge_segments(dict(slab,rgba=perforated,uniform=False))
+            assert any(np.allclose(edge[:,0],1/3) and np.allclose(edge[:,1],1/3) for edge in hole)
+            result['checks'].append('Layer outer edges preserve holes and remove internal boundaries of merged layers')
             core.warm_mumax_renderer();deadline=time.monotonic()+90
             while core._MUMAX_WARMING and time.monotonic()<deadline:
                 root.update();time.sleep(.025)
@@ -126,10 +171,14 @@ def run_self_test(report_path, *, gpu=False):
                 record=core.reflected_layer_record(glass_record,core.REFLECTION_DEFAULTS))]
             rgba=artist.raster(120,90,ax.get_proj(),ax.bbox.frozen())
             assert np.count_nonzero((rgba[:,:,3]>0)&(rgba[:,:,3]<255))>50
+            artist.fill_planes[0]['record']['edges']=True
+            edged=artist.raster(120,90,ax.get_proj(),ax.bbox.frozen())
+            assert np.count_nonzero(np.all(edged[:,:,:3]<30,axis=2)&(edged[:,:,3]>0))>20
             result['checks'].append('CPU glass layer rendering with translucent arrows')
             if gpu:
                 artist.force_cpu=False
                 rgba=artist.raster(120,90,ax.get_proj(),ax.bbox.frozen());assert rgba[:,:,3].any()
+                assert np.count_nonzero(np.all(rgba[:,:,:3]<30,axis=2)&(rgba[:,:,3]>0))>20
                 result['gpu'] = dict(engine=artist.last_engine,device=getattr(artist,'gpu_device','CPU fallback'),error=getattr(artist,'gpu_error',None))
                 core.close_mumax_gpu_scenes(fig)
                 result['checks'].append('GPU render path or analytic CPU fallback')

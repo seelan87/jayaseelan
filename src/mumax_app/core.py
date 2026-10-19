@@ -1157,8 +1157,10 @@ class LayerFillControl(ttk.LabelFrame):
         self.mode=tk.StringVar(master=self,value='Solid color')
         self.preset=tk.StringVar(master=self,value='Pastel blue')
         self.color=tk.StringVar(master=self,value=LAYER_FILL_COLORS['Pastel blue'])
-        self.colors=tk.StringVar(master=self,value='Use tab color map')
+        self.colors=tk.StringVar(master=self,value='Use tab preset')
         self.finish=tk.StringVar(master=self,value='Matte')
+        self.edges=tk.BooleanVar(master=self,value=False)
+        self.use_tab_preset=tk.BooleanVar(master=self,value=True)
         self.palette=tk.StringVar(master=self,value='Paint 3D style')
         self.transparency=tk.StringVar(master=self,value='70');self.alpha_slider=tk.DoubleVar(master=self,value=70)
         ttk.Checkbutton(self,text='Enable color fill',variable=self.enabled,command=self.master_changed).pack(anchor='w')
@@ -1190,7 +1192,7 @@ class LayerFillControl(ttk.LabelFrame):
         self.selection_label=tk.StringVar(master=self,value='Load an OVF to list Z layers.')
         ttk.Label(self.body,textvariable=self.selection_label,wraplength=250).pack(anchor='w',pady=3)
         ttk.Label(self.body,text='Fill style').pack(anchor='w')
-        box=ttk.Combobox(self.body,textvariable=self.mode,values=('Solid color','Component color map'),state='readonly')
+        box=ttk.Combobox(self.body,textvariable=self.mode,values=('Solid color','Component preset'),state='readonly')
         box.pack(fill='x');box.bind('<<ComboboxSelected>>',self.mode_changed)
         self.solid=ttk.Frame(self.body);self.mapping=ttk.Frame(self.body)
         box=ttk.Combobox(self.solid,textvariable=self.palette,values=tuple(LAYER_FILL_PALETTES),state='readonly')
@@ -1205,13 +1207,14 @@ class LayerFillControl(ttk.LabelFrame):
         ttk.Button(row,text='Custom color…',command=self.choose_color).pack(side='left',fill='x',expand=True)
         entry=ttk.Entry(row,textvariable=self.color,width=9);entry.pack(side='right',padx=(3,0))
         entry.bind('<Return>',self.commit);entry.bind('<FocusOut>',self.commit)
-        ttk.Label(self.mapping,text='Color map preset').pack(anchor='w')
-        box=ttk.Combobox(self.mapping,textvariable=self.colors,values=('Use tab color map',)+tuple(STREAM_COLOR_MAPS),state='normal')
-        box.pack(fill='x');box.bind('<<ComboboxSelected>>',self.commit);box.bind('<Return>',self.commit);box.bind('<FocusOut>',self.commit)
+        ttk.Checkbutton(self.mapping,text='Use tab preset',variable=self.use_tab_preset,command=self.tab_preset_changed).pack(anchor='w')
+        ttk.Label(self.mapping,textvariable=self.colors,wraplength=240).pack(anchor='w')
+        ttk.Button(self.mapping,text='Choose ParaView preset…',command=self.choose_fill_preset).pack(fill='x',pady=3)
         self.opacity_frame=ttk.Frame(self.body);self.opacity_frame.pack(fill='x',pady=3)
         ttk.Label(self.opacity_frame,text='Finish (3D)').pack(anchor='w')
         box=self.finish_choice=ttk.Combobox(self.opacity_frame,textvariable=self.finish,values=tuple(LAYER_FILL_FINISHES),state='readonly')
         box.pack(fill='x',pady=(0,4));box.bind('<<ComboboxSelected>>',self.finish_changed)
+        ttk.Checkbutton(self.opacity_frame,text='Edge enable',variable=self.edges,command=self.commit).pack(anchor='w',pady=(0,4))
         ttk.Label(self.opacity_frame,text='Transparency (%)').pack(anchor='w')
         row=ttk.Frame(self.opacity_frame);row.pack(fill='x')
         ttk.Scale(row,from_=0,to=100,variable=self.alpha_slider,command=self.slider_changed).pack(side='left',fill='x',expand=True)
@@ -1243,7 +1246,7 @@ class LayerFillControl(ttk.LabelFrame):
             seed=self.records.get(self.current) or next(iter(self.records.values()),None)
             style={k:v for k,v in seed.items() if k not in ('index','checked')} if seed else dict(
                 mode=self.mode.get(),preset=self.preset.get(),color=self.color.get(),colors=self.colors.get(),
-                finish=self.finish.get(),transparency=float(self.transparency.get()))
+                finish=self.finish.get(),edges=self.edges.get(),transparency=float(self.transparency.get()))
             self.merge_sets[1]=dict(indices=[i for i,r in self.records.items() if r['checked']],style=style)
             self.merge_set.set('Set 1')
         if self.merge.get():self.merge_row.pack(fill='x',before=self.tree_frame,pady=2)
@@ -1313,7 +1316,7 @@ class LayerFillControl(ttk.LabelFrame):
             self.tree.delete(*self.tree.get_children())
             for index,value in enumerate(z['centers']):
                 self.records[index]=dict(old.get(index) or dict(index=index,checked=False,mode='Solid color',
-                    preset='Pastel blue',color=LAYER_FILL_COLORS['Pastel blue'],colors='Use tab color map',transparency=70.,finish='Matte'))
+                    preset='Pastel blue',color=LAYER_FILL_COLORS['Pastel blue'],colors='Use tab preset',transparency=70.,finish='Matte'))
                 self.tree.insert('','end',iid=str(index),values=self.row_values(index))
             self.current=min(self.current or 0,max(0,count-1)) if count else None
             if self.current is not None:self.tree.selection_set(str(self.current))
@@ -1342,6 +1345,7 @@ class LayerFillControl(ttk.LabelFrame):
                 record=self.merge_style or record
             self.mode.set(record['mode']);self.preset.set(record['preset']);self.color.set(record['color']);self.colors.set(record['colors'])
             self.finish.set(record.get('finish','Matte'))
+            self.edges.set(record.get('edges',False));self.use_tab_preset.set(record['colors']=='Use tab preset')
             self.transparency.set(f'{record["transparency"]:g}');self.alpha_slider.set(record['transparency'])
             self.swatch.configure(background=record['color'])
             z=self.source_z[1];step=(z['edges'][1]-z['edges'][0])/len(z['centers'])
@@ -1407,6 +1411,14 @@ class LayerFillControl(ttk.LabelFrame):
         except (ValueError,tk.TclError):pass
         self.commit()
 
+    def tab_preset_changed(self):
+        self.colors.set('Use tab preset' if self.use_tab_preset.get() else 'Cool to Warm')
+        self.commit()
+
+    def choose_fill_preset(self):
+        def changed():self.use_tab_preset.set(False);self.commit()
+        self.color_preset_picker=show_shared_color_presets(self.winfo_toplevel(),self,self.colors,changed)
+
     def commit(self,event=None):
         if self.loading or self.busy or self.current is None:return False
         from matplotlib.colors import to_hex,to_rgba
@@ -1414,9 +1426,9 @@ class LayerFillControl(ttk.LabelFrame):
             transparency=float(self.transparency.get())
             if not math.isfinite(transparency) or not 0<=transparency<=100:raise ValueError('Transparency must be 0–100%.')
             color=to_hex(to_rgba(self.color.get()))
-            if self.mode.get()=='Component color map' and self.colors.get()!='Use tab color map':stream_color_map(self.colors.get())
+            if self.mode.get()=='Component preset' and self.colors.get()!='Use tab preset':stream_color_map(self.colors.get())
         except (ValueError,TypeError) as exc:self.status.set(str(exc));return False
-        style=dict(mode=self.mode.get(),preset=self.preset.get(),color=color,colors=self.colors.get(),transparency=transparency,finish=self.finish.get())
+        style=dict(mode=self.mode.get(),preset=self.preset.get(),color=color,colors=self.colors.get(),transparency=transparency,finish=self.finish.get(),edges=self.edges.get())
         if self.merge.get():
             self.merge_style=style
             group=self.merge_sets.get(self.current_merge_id())
@@ -1523,7 +1535,7 @@ def layer_fill_rgba(plane,record,component,colors,clim,material_mask=None):
     if record['mode']=='Solid color':
         rgba=np.empty((*plane.shape[:2],4),np.uint8);rgba[:]=np.rint(np.array(to_rgba(record['color']))*255).astype(np.uint8)
     else:
-        name=colors if record['colors']=='Use tab color map' else record['colors']
+        name=colors if record['colors']=='Use tab preset' else record['colors']
         values=np.linalg.norm(plane,axis=-1) if component=='mag' else plane[:,:,{'mx':0,'my':1,'mz':2}[component]]
         lo,hi=clim;hi=hi if hi>lo else lo+1
         rgba=np.uint8(np.rint(stream_color_map(name)(np.clip((values-lo)/(hi-lo),0,1))*255))
@@ -1758,8 +1770,7 @@ def layer_fill_coalesce_edges(edges):
     return values[np.r_[True,np.diff(values)>tolerance]]
 
 
-def vtk_layer_fill_mesh(plane):
-    pv=require_tab4_backend()
+def layer_fill_grid_data(plane):
     if not plane.get('parts'):
         x,y,z,reduced=layer_fill_rectilinear_data(plane)
         rgba=reduced[None]
@@ -1779,6 +1790,39 @@ def vtk_layer_fill_mesh(plane):
         # coplanar subdivisions on the outer side walls when shapes match.
         starts=np.r_[0,1+np.flatnonzero(np.any(rgba[1:]!=rgba[:-1],axis=(1,2,3)))]
         rgba=rgba[starts];z=z[np.r_[starts,len(z)-1]]
+    return x,y,z,rgba
+
+
+def layer_fill_edge_segments(plane):
+    """Creases of the occupied volume only; coplanar cell edges stay hidden."""
+    x,y,z,rgba=layer_fill_grid_data(plane);occupied=rgba[:,:,:,3]>0
+    result=[]
+    for axis in range(3):
+        padding=[(1,1)]*3;padding[axis]=(0,0)
+        padded=np.pad(occupied,padding)
+        others=[i for i in range(3) if i!=axis];corners=[]
+        for first,second in ((0,0),(0,1),(1,0),(1,1)):
+            slices=[slice(None)]*3
+            slices[others[0]]=slice(first,-1 if first==0 else None)
+            slices[others[1]]=slice(second,-1 if second==0 else None)
+            corners.append(padded[tuple(slices)])
+        a,b,c,d=corners;count=sum(v.astype(np.uint8) for v in corners)
+        crease=(count==1)|(count==3)|((count==2)&((a&d)|(b&c)))
+        iz,iy,ix=np.nonzero(crease)
+        start=np.column_stack((x[ix],y[iy],z[iz]));end=start.copy()
+        coord=2-axis;indices=(ix,iy,iz)[coord];end[:,coord]=(x,y,z)[coord][indices+1]
+        if len(start):result.append(np.stack((start,end),axis=1))
+    return np.concatenate(result) if result else np.empty((0,2,3))
+
+
+def vtk_layer_fill_edges(plane):
+    pv=require_tab4_backend();segments=layer_fill_edge_segments(plane)
+    lines=np.column_stack((np.full(len(segments),2),np.arange(len(segments)*2).reshape(-1,2))).ravel()
+    return pv.PolyData(segments.reshape(-1,3),lines=lines)
+
+
+def vtk_layer_fill_mesh(plane):
+    pv=require_tab4_backend();x,y,z,rgba=layer_fill_grid_data(plane)
     grid=pv.RectilinearGrid(x,y,z)
     grid.cell_data['layer_rgba']=rgba.reshape(-1,4)
     valid=np.flatnonzero(rgba[:,:,:,3].ravel())
@@ -2443,12 +2487,9 @@ class InteractiveCrossSectionBase(LinkedCrossSectionBase):
         colors = self.group('Colors and labels')
         ttk.Label(colors,text='Color component').pack(anchor='w')
         self.picker(colors,self.component)
-        ttk.Label(colors,text='Color map').pack(anchor='w')
-        self.color_box = ttk.Combobox(colors,textvariable=self.colors,values=STREAM_COLOR_MAPS,state='normal')
-        self.color_box.pack(fill='x',pady=3)
-        self.color_box.bind('<<ComboboxSelected>>',lambda e:self.schedule_render())
-        self.color_box.bind('<Return>',lambda e:self.schedule_render())
-        self.color_preset_button = ttk.Button(colors,text='Choose preset…',command=self.choose_color_preset)
+        ttk.Label(colors,text='ParaView color preset').pack(anchor='w')
+        ttk.Label(colors,textvariable=self.colors,wraplength=240).pack(anchor='w',pady=3)
+        self.color_preset_button = ttk.Button(colors,text='Choose ParaView preset…',command=self.choose_color_preset)
         self.color_preset_button.pack(fill='x',pady=(0,3))
         row = ttk.Frame(colors)
         row.pack(fill='x')
@@ -3782,6 +3823,7 @@ class MumaxGPUScene:
             digest.update(np.ascontiguousarray(value).view(np.uint8))
         digest.update(repr((artist.head_ratio,artist.quality,None if artist.half is None else tuple(artist.half))).encode())
         for plane in getattr(artist,'fill_planes',[]):
+            digest.update(bytes([bool(plane['record'].get('edges',False))]))
             parts=plane.get('parts',[plane]);digest.update(repr(len(parts)).encode())
             for part in parts:
                 digest.update(repr((part['xy'],part['z_bounds'],part['rgba'].shape)).encode())
@@ -3799,6 +3841,7 @@ class MumaxGPUScene:
         self.renderer.AddActor(actor);self.glyph_actors.append(actor)
 
     def prepare(self,artist):
+        vtk=self.vtk
         key=self.signature(artist)
         if key!=self.geometry_key:
             self.renderer.RemoveAllViewProps();self.glyph_actors=[];self.fill_actors=[]
@@ -3829,6 +3872,11 @@ class MumaxGPUScene:
                     from matplotlib.colors import to_rgb
                     prop.SetSpecularColor(*to_rgb(plane['record']['color']))
                 self.renderer.AddActor(actor);self.fill_actors.append((actor,plane))
+                if plane['record'].get('edges',False):
+                    edge_mapper=vtk.vtkPolyDataMapper();edge_mapper.SetInputData(vtk_layer_fill_edges(plane));edge_mapper.ScalarVisibilityOff()
+                    edge_actor=vtk.vtkActor();edge_actor.SetMapper(edge_mapper);edge_actor.SetScale(*(1/artist.metric))
+                    edge_actor.GetProperty().SetColor(.08,.08,.08);edge_actor.GetProperty().SetLineWidth(1.4)
+                    edge_actor.GetProperty().LightingOff();self.renderer.AddActor(edge_actor)
             bounds=np.asarray(self.renderer.ComputeVisiblePropBounds()).reshape(3,2)
             if not np.isfinite(bounds).all() or np.any(bounds[:,0]>bounds[:,1]):bounds=np.array([[0,1],[0,1],[0,1]],float)
             self.corners=np.array([[x,y,z,1.] for x in bounds[0] for y in bounds[1] for z in bounds[2]])
@@ -3930,11 +3978,29 @@ class LayerFilledGlyphArtist(SmoothSolidGlyphArtist):
         gpu=mumax_gpu_raster(self,width,height,matrix,box)
         if gpu is not None:return gpu
         image=super().raster(width,height,matrix,box)
-        if not getattr(self,'fill_planes',None) or getattr(self,'_cpu_transparency_composited',False):
-            self.fill_depth=None
-            return image
-        try:return composite_layer_fill_rays(self,image,self.fill_depth,width,height,matrix,box)
-        finally:self.fill_depth=None
+        if getattr(self,'fill_planes',None) and not getattr(self,'_cpu_transparency_composited',False):
+            try:image=composite_layer_fill_rays(self,image,self.fill_depth,width,height,matrix,box)
+            finally:self.fill_depth=None
+        self.fill_depth=None
+        return self.draw_layer_edges(image,width,height,matrix,box)
+
+    def draw_layer_edges(self,image,width,height,matrix,box):
+        planes=[p for p in getattr(self,'fill_planes',[]) if p['record'].get('edges',False)]
+        if not planes:return image
+        result=Image.fromarray(image.copy());draw=ImageDraw.Draw(result)
+        transform=self.ax.transData.get_affine().get_matrix()
+        for plane in planes:
+            if '_edge_segments' not in plane:plane['_edge_segments']=layer_fill_edge_segments(plane)
+            edges=plane['_edge_segments'];points=edges.reshape(-1,3)
+            clip=np.column_stack((points,np.ones(len(points))))@matrix.T
+            valid=np.all(np.isfinite(clip),axis=1)&(clip[:,3]>1e-12)
+            projected=clip[:,:2]/np.maximum(clip[:,3,None],1e-12)
+            screen=np.column_stack((projected,np.ones(len(points))))@transform.T
+            screen[:,0]=(screen[:,0]-box.x0)*width/box.width
+            screen[:,1]=(screen[:,1]-box.y0)*height/box.height
+            for segment,good in zip(screen[:,:2].reshape(-1,2,2),valid.reshape(-1,2).all(axis=1)):
+                if good:draw.line([tuple(p) for p in segment],fill=(20,20,20,255),width=max(1,round(max(width,height)/600)))
+        return np.asarray(result)
 
 
 class BandCrossSectionBase(ROICrossSectionBase):
@@ -6090,7 +6156,7 @@ class StreamPresetPicker(tk.Toplevel):
     def __init__(self,parent,current,apply):
         super().__init__(parent)
         self.title('Choose color preset');self.transient(parent);self.geometry('620x530');self.minsize(420,300)
-        self.apply_callback=apply;self.names=list(STREAM_COLOR_MAPS);self.photos={};self.current=current
+        self.apply_callback=apply;self.names=list(PARAVIEW_COLOR_PRESETS);self.photos={};self.current=current
         self.search=tk.StringVar();self.label=tk.StringVar()
         top=ttk.Frame(self,padding=8);top.pack(fill='x')
         ttk.Label(top,text='Search').pack(side='left',padx=(0,8))
@@ -6535,7 +6601,7 @@ class StreamIsoViewBase(ttk.Frame):
         self.opacity = tk.DoubleVar(value=.55)
         self.show_streams = tk.BooleanVar(value=True);self.show_iso = tk.BooleanVar(value=True)
         self.show_scales = tk.BooleanVar(value=True);self.show_bar = tk.BooleanVar(value=True)
-        self.show_time = tk.BooleanVar(value=True);self.colors = tk.StringVar(value='blue,white,red')
+        self.show_time = tk.BooleanVar(value=True);self.colors = tk.StringVar(value='Cool to Warm')
         self.status = tk.StringVar(value='Load a vector-field folder or use Tab 3 data. Left-drag pans; middle-drag rotates; wheel zooms.')
         self.columnconfigure(0,weight=1);self.rowconfigure(0,weight=1)
         self.divider = ttk.Panedwindow(self,orient='horizontal');self.divider.grid(row=0,column=0,sticky='nsew')
@@ -6575,7 +6641,10 @@ class StreamIsoViewBase(ttk.Frame):
         for name,icon in zip(('mx','my','mz'),gui.component_icons):
             ttk.Radiobutton(row,image=icon,variable=self.component,value=name,command=self.schedule).pack(side='left',padx=3)
         ttk.Radiobutton(row,text='|m|',variable=self.component,value='mag',command=self.schedule).pack(side='left',padx=3)
-        self.dropdown(group,'Colors',self.colors,COLOR_PRESETS)
+        ttk.Label(group,text='ParaView color preset').pack(anchor='w')
+        ttk.Label(group,textvariable=self.colors,wraplength=240).pack(anchor='w',pady=2)
+        self.color_preset_button=ttk.Button(group,text='Choose ParaView preset…',command=self.choose_color_preset)
+        self.color_preset_button.pack(fill='x',pady=3)
         group = self.group('Streamlines')
         ttk.Checkbutton(group,text='Show',variable=self.show_streams,command=self.schedule).pack(anchor='w')
         self.entry(group,'Seeds',self.seeds)
@@ -6948,15 +7017,9 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
         self.color_range_mode = tk.StringVar(value='Fixed');self.color_low = tk.StringVar(value='-1');self.color_high = tk.StringVar(value='1')
         groups = {str(g.cget('text')):g for g in self.controls.winfo_children() if isinstance(g,ttk.LabelFrame)}
         self.groups = groups
-        for child in groups['Component'].winfo_children():
-            if isinstance(child,ttk.Label) and str(child.cget('text'))=='Colors':child.configure(text='Color map')
-            if isinstance(child,ttk.Combobox) and str(child.cget('textvariable'))==str(self.colors):
-                child.configure(values=STREAM_COLOR_MAPS,state='normal')
-                child.bind('<Return>',lambda e:self.schedule());child.bind('<FocusOut>',lambda e:self.schedule())
-                ttk.Button(groups['Component'],text='Choose preset…',command=self.choose_color_preset).pack(fill='x',after=child,pady=3)
         self.volume_view=tk.StringVar(value='3D')
-        view_group=self.group('View');view_group.pack_configure(before=groups['Streamlines'])
-        box=ttk.Combobox(view_group,textvariable=self.volume_view,values=['3D','XY','YZ','XZ'],state='readonly')
+        view_group=self.view_3d_group=self.group('3D view');view_group.pack_configure(before=groups['Streamlines'])
+        box=self.view_3d_choice=ttk.Combobox(view_group,textvariable=self.volume_view,values=['3D','XY','YZ','XZ'],state='readonly')
         box.pack(fill='x');box.bind('<<ComboboxSelected>>',self.volume_view_changed)
         frames = groups['Frames']
         row = ttk.Frame(frames);row.pack(fill='x',pady=3)
@@ -7241,6 +7304,8 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
         self.plotter.reset_camera()
 
     def volume_view_changed(self,event=None):
+        if hasattr(self,'camera_mode'):
+            self.camera_mode.set('3D');return
         if self.scene_valid:StreamVolumeControlsBase.camera_default(self);self.paint()
 
     def display_scene(self):
@@ -7266,7 +7331,7 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
         structural['merge_layer']=bool(fill_state.get('merge'))
         structural['layer_fill']=[dict({k:v for k,v in r.items() if k!='transparency'},visible=r['transparency']<100)
             for r in fill_state.get('layers',[])] if fill_state.get('enabled') else []
-        if any(r['mode']=='Component color map' for r in fill_state.get('layers',[])):
+        if any(r['mode']=='Component preset' for r in fill_state.get('layers',[])):
             structural['fill_map']=(self.style['colors'],tuple(clim))
         display_key=(id(self.result),json.dumps(structural,sort_keys=True))
         if self.scene_valid and self.display_cache_key==display_key:
@@ -7343,6 +7408,9 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
                 opacity=plane['opacity'],show_scalar_bar=False,**layer_finish_material(plane['record'],self.style.get('ambient_light',.35)))
             apply_layer_finish(actor,plane['record'],self.style.get('ambient_light',.35))
             self.layer_fill_actors[plane['index']]=actor
+            if plane['record'].get('edges',False):
+                plotter.add_mesh(vtk_layer_fill_edges(plane),color='#141414',line_width=1.4,lighting=False,
+                    opacity=1.,show_scalar_bar=False)
         if fill_planes:plotter.enable_depth_peeling(number_of_peels=16,occlusion_ratio=0.)
         if self.style['seeds'] and self.result['seeds'].n_points:
             plotter.add_mesh(self.result['seeds'],color='#222222',point_size=5,render_points_as_spheres=True)
@@ -8063,7 +8131,7 @@ class StreamIsoTab(StreamAnalysisControlsMixin,StreamVolumeControlsBase):
         self.slice_exact_position=None;self.slice_display_text=''
         self.slice_thickness=tk.StringVar(value='2');self.show_slice=tk.BooleanVar(value=True)
         self.slice_opacity=tk.DoubleVar(value=.35);self.stream_domain=tk.StringVar(value='On slice')
-        self.camera_mode=tk.StringVar(value='Slice');self.slice_bounds_label=tk.StringVar(value='Load a frame')
+        self.camera_mode=tk.StringVar(value='3D');self.slice_bounds_label=tk.StringVar(value='Load a frame')
         self.slice_positions={}
         self.initialize_position_controls()
         super().__init__(gui,parent)
@@ -8085,7 +8153,6 @@ class StreamIsoTab(StreamAnalysisControlsMixin,StreamVolumeControlsBase):
         ttk.Checkbutton(group,text='Show colored slice',variable=self.show_slice,command=self.schedule).pack(anchor='w')
         ttk.Label(group,text='Slice opacity').pack(anchor='w')
         ttk.Scale(group,from_=0,to=1,variable=self.slice_opacity,command=lambda v:self.schedule()).pack(fill='x')
-        self.dropdown(group,'Camera',self.camera_mode,['Slice','3D'])
         ttk.Button(group,text='Align to slice',command=self.align_slice).pack(fill='x',pady=2)
         self.build_position_roi_movie_controls(group)
         self.show_message('Load a vector-field folder or use Tab 3 data.')
@@ -8165,7 +8232,7 @@ class StreamIsoTab(StreamAnalysisControlsMixin,StreamVolumeControlsBase):
 
     def camera_default(self):
         if not self.cross_section_enabled.get():return super().camera_default()
-        if self.camera_mode.get()=='3D':self.plotter.view_isometric();self.plotter.disable_parallel_projection()
+        if self.camera_mode.get()=='3D':return super().camera_default()
         else:
             {'XY':self.plotter.view_xy,'YZ':self.plotter.view_yz,'XZ':self.plotter.view_xz}[self.slice_view.get()]()
             self.plotter.enable_parallel_projection()
@@ -8436,7 +8503,7 @@ class ConverterGUI:
         self.ovf_input, self.ovf_output = tk.StringVar(), tk.StringVar()
         self.component = tk.StringVar(value="mz")
         self.out_format = tk.StringVar(value="PNG")
-        self.colors = tk.StringVar(value="blue,white,red")
+        self.colors = tk.StringVar(value="Cool to Warm")
         self.ppi = tk.StringVar(value="300")
         self.upscale = tk.StringVar(value="1x")
         self.arrows = tk.BooleanVar(value=False)
@@ -8463,12 +8530,11 @@ class ConverterGUI:
         ttk.Radiobutton(component_picker,text="ALL",variable=self.component,value="ALL").pack(side="left",padx=3)
         ttk.Label(settings, text="Format").grid(row=0,column=2,sticky="w",padx=4)
         ttk.Combobox(settings, textvariable=self.out_format, values=["JPG","PNG","TIFF"], state="readonly", width=10).grid(row=0,column=3,sticky="ew",padx=4)
-        ttk.Label(settings, text="Color map").grid(row=1,column=0,sticky="w",padx=4,pady=4)
+        ttk.Label(settings, text="ParaView color preset").grid(row=1,column=0,sticky="w",padx=4,pady=4)
         color_controls = ttk.Frame(settings)
         color_controls.grid(row=1,column=1,sticky="ew",padx=4,pady=4)
-        self.color_box = ttk.Combobox(color_controls, textvariable=self.colors, values=STREAM_COLOR_MAPS, state="normal", width=28)
-        self.color_box.pack(fill='x')
-        self.color_preset_button = ttk.Button(color_controls,text='Choose preset…',command=self.choose_tab1_color_preset)
+        ttk.Label(color_controls,textvariable=self.colors,wraplength=260).pack(anchor='w')
+        self.color_preset_button = ttk.Button(color_controls,text='Choose ParaView preset…',command=self.choose_tab1_color_preset)
         self.color_preset_button.pack(fill='x',pady=(3,0))
         ttk.Label(settings, text="PPI metadata").grid(row=1,column=2,sticky="w",padx=4)
         ttk.Combobox(settings, textvariable=self.ppi, values=["150","300","600"], state="readonly", width=10).grid(row=1,column=3,sticky="ew",padx=4)
