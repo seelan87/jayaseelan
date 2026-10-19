@@ -16,6 +16,12 @@ Tab 4's always-visible **3D view** selector offers 3D, XY, YZ and XZ camera
 orientations independently of the cross-section controls. In Tabs 3 and 4,
 **Layer Fill → Edge enable** outlines the selected layer or merge set, preserving
 holes and the outer shape without drawing internal cell or merged-layer seams.
+Tab 4's Display panel includes **Background color**, **Show outline**, and
+**Outline color**. PNG and MP4 exports retain these settings; labels adapt to
+light and dark backgrounds.
+The shared gallery includes exact RGB **Red → White → Blue** and
+**Blue → White → Red** ramps. The selected preset drives both field colors and
+the corresponding color bar in views and exports.
 
 ## Download and run
 

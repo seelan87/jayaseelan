@@ -68,7 +68,13 @@ def run_self_test(report_path, *, gpu=False):
             for name in ('Cool to Warm','Black-Body Radiation'):
                 image=core.scalar_slice_image(vectors[0,:,:,2],name)
                 core.decorate_image(image,dict(colorbar=True),colors=name,component='mz').save(images/(name+'.png'))
-            assert len(core.PARAVIEW_COLOR_PRESETS)==137
+            assert len(core.PARAVIEW_COLOR_PRESETS)==139
+            for name,endpoints in (('Red → White → Blue',[[1.,0.,0.],[1.,1.,1.],[0.,0.,1.]]),
+                    ('Blue → White → Red',[[0.,0.,1.],[1.,1.,1.],[1.,0.,0.]])):
+                np.testing.assert_allclose(core.stream_color_map(name)(np.array([0.,.5,1.]))[:,:3],endpoints,atol=1e-6)
+                colored=core.render_field_image(source,colors=name,annotations=dict(colorbar=True))
+                assert colored.mode=='RGB' and colored.width>vectors.shape[2]
+            result['checks'].append('Shared exact Red/White/Blue and Blue/White/Red presets with matching field colors and color bars')
             _,movie,count=core.convert_images_to_video(images,output,8.,'360p')
             cap=cv2.VideoCapture(str(movie));assert cap.read()[0] and count==2;cap.release()
             result['checks'].append('ParaView presets, Pillow PNG, color bar and OpenCV MP4 encoder/decoder')
@@ -93,6 +99,37 @@ def run_self_test(report_path, *, gpu=False):
                 picker.tree.selection_set('Cool to Warm');picker.apply_selected()
                 assert owner.colors.get()=='Cool to Warm'
             stream=app.stream_tab
+            import tkinter.colorchooser as colorchooser
+            original_picker=colorchooser.askcolor
+            try:
+                colorchooser.askcolor=lambda **kwargs:((0,0,0),'#000000')
+                stream.background_button.invoke();assert stream.background_color.get()=='#000000'
+                colorchooser.askcolor=lambda **kwargs:((255,128,0),'#ff8000')
+                stream.outline_button.invoke();assert stream.outline_color.get()=='#ff8000'
+                colorchooser.askcolor=lambda **kwargs:(None,None)
+                stream.outline_button.invoke();assert stream.outline_color.get()=='#ff8000'
+            finally:colorchooser.askcolor=original_picker
+            stream.outline_checkbox.invoke();assert not stream.show_outline.get()
+            stream.outline_checkbox.invoke();assert stream.show_outline.get()
+            _,display_style=stream.filter_settings()
+            assert display_style['background']=='#000000' and display_style['outline_color']=='#ff8000'
+            assert display_style['outline']
+            calls=[];bar=vtk.vtkScalarBarActor();bounds_actor=vtk.vtkCubeAxesActor();outline=pv.Actor()
+            display=core.SimpleNamespace(style=display_style,bounds_actor=bounds_actor,outline_actor=outline,
+                plotter=core.SimpleNamespace(set_background=lambda *args,**kwargs:calls.append((args,kwargs)),scalar_bars={'m':bar}))
+            core.apply_stream_display_colors(display)
+            assert calls[-1][0][0]=='#000000' and bar.GetLabelTextProperty().GetColor()==(1.,1.,1.)
+            assert bounds_actor.GetTitleTextProperty(0).GetColor()==(1.,1.,1.)
+            np.testing.assert_allclose(outline.prop.GetColor(),(1.,128/255,0.))
+            display.style=dict(display_style,background='#ffffff',outline_color='#00ffff')
+            core.apply_stream_display_colors(display)
+            assert bar.GetLabelTextProperty().GetColor()==(0.,0.,0.)
+            np.testing.assert_allclose(outline.prop.GetColor(),(0.,1.,1.))
+            title=core.draw_figure_header(Image.new('RGB',(240,100)),['mz','t = 2 ns'],12,
+                background='#000000',foreground='white')
+            assert title.getpixel((0,0))==(0,0,0) and np.asarray(title).max()==255
+            stream.background_color.set('#ffffff');stream.outline_color.set('#303030')
+            result['checks'].append('Tab 4 background/outline controls, display/export style snapshots and dark-background label contrast')
             assert stream.view_3d_group not in stream.section_groups and stream.view_3d_group.winfo_manager()=='pack'
             assert not any(isinstance(w,core.ttk.Combobox) and str(w.cget('textvariable'))==str(stream.camera_mode)
                 for group in stream.section_groups for w in descendants(group))
@@ -182,6 +219,34 @@ def run_self_test(report_path, *, gpu=False):
                 result['gpu'] = dict(engine=artist.last_engine,device=getattr(artist,'gpu_device','CPU fallback'),error=getattr(artist,'gpu_error',None))
                 core.close_mumax_gpu_scenes(fig)
                 result['checks'].append('GPU render path or analytic CPU fallback')
+                stream=app.stream_tab;paint=stream.paint
+                stream.vectors=vectors;stream.mesh=mesh;stream.time_ns=2.
+                stream.style=stream.filter_settings()[1]
+                stream.result=dict(grid=grid,iso=grid.contour([0.],scalars='mz'),streams=pv.PolyData(),seeds=pv.PolyData(),
+                    scalar_range=(-1.,1.),display_bounds=grid.bounds,section=None)
+                stream.plotter=pv.Plotter(off_screen=True,window_size=(700,500),shape=(1,2),col_weights=[.88,.12],border=False)
+                stream.paint=lambda:None
+                try:
+                    stream.style.update(background='#000000',outline_color='#ff8000',colors='Blue → White → Red')
+                    stream.display_scene();stream.plotter.render()
+                    dark=stream.overlay(Image.fromarray(stream.plotter.screenshot(return_img=True)))
+                    assert dark.getpixel((0,0))==(0,0,0)
+                    np.testing.assert_allclose(stream.outline_actor.prop.GetColor(),(1.,128/255,0.))
+                    iso_actor=stream.actor_cache['iso'][0]
+                    stream.style.update(background='#ffffff',outline_color='#00ffff')
+                    stream.display_scene();stream.plotter.render()
+                    light=stream.overlay(Image.fromarray(stream.plotter.screenshot(return_img=True)))
+                    assert light.getpixel((0,0))==(255,255,255)
+                    assert stream.actor_cache['iso'][0] is iso_actor
+                    np.testing.assert_allclose(stream.outline_actor.prop.GetColor(),(0.,1.,1.))
+                    stream.style['outline']=False;stream.display_scene()
+                    assert stream.outline_actor is None
+                    previews=Path(report_path).resolve().parent;previews.mkdir(parents=True,exist_ok=True)
+                    dark.save(previews/'tab4-dark-background.png');light.save(previews/'tab4-light-background.png')
+                    result['checks'].append('Tab 4 GPU render/export images, cached background/outline updates and outline visibility')
+                finally:
+                    stream.plotter.close();stream.plotter=None;stream.paint=paint;stream.scene_valid=False
+                    stream.actor_cache={};stream.outline_actor=stream.bounds_actor=None
             assert not callbacks,callbacks
         result['passed']=True
     except Exception:
