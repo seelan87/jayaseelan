@@ -7,9 +7,9 @@ reflection/transparency, and PNG/MP4 export.
 
 ## Download and run
 
-1. Open **Actions → Build Windows x64 EXE** and select the latest successful run.
-2. Download the **MuMax3-Image-Tools-windows-x64** artifact and extract it.
-3. Double-click **MuMax3-Image-Tools-windows-x64.exe** for the self-contained app.
+1. Open [the latest Windows release](https://github.com/seelan87/jayaseelan/releases/latest).
+2. Download **MuMax3-Image-Tools-windows-x64.exe** from its assets.
+3. Double-click it for the self-contained app.
    Python and Jupyter are not required. First launch extracts the bundled libraries
    into Windows' temporary folder and can take longer than later GUI operations.
 
@@ -36,6 +36,8 @@ and through **Actions → Build Windows x64 EXE → Run workflow**. It installs 
 dependencies with 64-bit Python 3.12, checks the source app, builds the portable
 executable and tests it, then builds and tests the single-file executable.
 Downloads include SHA-256 checksums and dependency license notices.
+Successful builds from the default branch are also published under **Releases**.
+The complete build and test reports remain available as GitHub Actions artifacts.
 
 ## Build locally
 

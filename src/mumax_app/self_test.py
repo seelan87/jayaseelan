@@ -17,6 +17,8 @@ def run_self_test(report_path, *, gpu=False):
                   python=platform.python_version(), checks=[])
     root = app = None
     try:
+        from .vtk_compat import register_overrides
+        register_overrides()
         import numpy as np
         import pyvista as pv
         import vtk
@@ -31,6 +33,10 @@ def run_self_test(report_path, *, gpu=False):
         assert struct.calcsize('P')==8
         result['versions'] = dict(numpy=np.__version__,pyvista=pv.__version__,vtk=vtk.vtkVersion.GetVTKVersion(),numba=numba.__version__,opencv=cv2.__version__)
         result['checks'].append('x64 scientific and rendering libraries import')
+        implicit = pv.ImageData(dimensions=(3,3,3)).GetPoints().GetData()
+        assert hasattr(implicit, '__array__'), 'VTK implicit-array Python overrides were not loaded.'
+        assert np.asarray(implicit).shape == (27,3)
+        result['checks'].append('VTK implicit-array NumPy overrides in frozen import environment')
         with tempfile.TemporaryDirectory(prefix='mumax-exe-selftest-') as temp:
             folder=Path(temp);frames=folder/'fields';frames.mkdir();output=folder/'output';output.mkdir()
             z,y,x=np.indices((3,7,9))

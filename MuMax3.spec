@@ -1,7 +1,7 @@
 # PyInstaller specification for a Windows x64 Tk + Matplotlib + VTK application.
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 project = Path(SPECPATH)
 name = 'MuMax3-Image-Tools'
@@ -18,6 +18,8 @@ hiddenimports = ['matplotlib.backends.backend_tkagg', 'matplotlib.backends.backe
                  'PIL._tkinter_finder', 'vtkmodules', 'vtkmodules.all',
                  'vtkmodules.util.numpy_support', 'vtkmodules.numpy_interface.dataset_adapter',
                  'numba', 'llvmlite.binding', 'scipy.spatial._ckdtree']
+hiddenimports += collect_submodules('vtkmodules.numpy_interface')
+hiddenimports += collect_submodules('vtkmodules.util')
 a = Analysis([str(project/'launcher.py')], pathex=[str(project/'src')],
              binaries=binaries, datas=datas, hiddenimports=hiddenimports,
              hookspath=[], hooksconfig={'matplotlib': {'backends': ['TkAgg', 'Agg']}},

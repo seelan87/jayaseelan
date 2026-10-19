@@ -46,6 +46,8 @@ def main(argv=None):
         from mumax_app.self_test import run_self_test
         return run_self_test(Path(args.self_test), gpu=args.render_test)
     try:
+        from mumax_app.vtk_compat import register_overrides
+        register_overrides()
         from mumax_app.core import ConverterGUI, tk, messagebox
         root = tk.Tk()
         def report_callback_exception(kind, value, tb):
