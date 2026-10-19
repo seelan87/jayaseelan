@@ -1,5 +1,6 @@
 # PyInstaller specification for a Windows x64 Tk + Matplotlib + VTK application.
 import os
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
@@ -27,6 +28,15 @@ a = Analysis([str(project/'launcher.py')], pathex=[str(project/'src')],
                  'PyQt5','PyQt6','PySide2','PySide6','wx','pytest',
                  'numba.tests','llvmlite.tests','vtkmodules.qt'],
              noarchive=False)
+# A venv based on Conda can inherit an unrelated Tcl/Tk DLL from another Python
+# on PATH. Match the collected init.tcl/tk.tcl files to the base interpreter's
+# DLLs. On standard CPython/GitHub runners these already point to the same files.
+for dll in ('tcl86t.dll', 'tk86t.dll'):
+    candidates = [Path(sys.base_prefix)/'Library/bin'/dll, Path(sys.base_prefix)/'DLLs'/dll]
+    matching = next((path for path in candidates if path.is_file()), None)
+    if matching is not None:
+        a.binaries = [(dest, str(matching) if Path(dest).name.lower()==dll else src, kind)
+                      for dest, src, kind in a.binaries]
 pyz = PYZ(a.pure)
 options = dict(name=name, debug=False, bootloader_ignore_signals=False,
                strip=False, upx=False, console=False, disable_windowed_traceback=False)
