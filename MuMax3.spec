@@ -15,6 +15,10 @@ for package in ('pyvista', 'numba', 'llvmlite'):
 for distribution in ('pyvista', 'vtk', 'numba', 'llvmlite', 'numpy', 'matplotlib', 'scipy', 'pillow', 'opencv-python'):
     datas += copy_metadata(distribution)
 binaries = collect_dynamic_libs('vtkmodules') + collect_dynamic_libs('llvmlite')
+# Conda's Tcl DLL additionally links to its adjacent zlib1.dll. Standard CPython
+# does not have this layout; only collect it when this interpreter provides it.
+conda_zlib = Path(sys.base_prefix)/'Library/bin/zlib1.dll'
+if conda_zlib.is_file():binaries.append((str(conda_zlib), '.'))
 hiddenimports = ['matplotlib.backends.backend_tkagg', 'matplotlib.backends.backend_agg',
                  'PIL._tkinter_finder', 'vtkmodules', 'vtkmodules.all',
                  'vtkmodules.util.numpy_support', 'vtkmodules.numpy_interface.dataset_adapter',
