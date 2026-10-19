@@ -1,5 +1,6 @@
 {
   "notebook": "mumax3_ovf_image_and_mp4_gui_fixed.ipynb",
   "source_sha256": "6c3a3a573d195e28a68ffa44ddaf8abf5916b274a421666116c5897f2d88d45e",
-  "standalone_sha256": "4c7af60a42bb4ebe237e532fdfa95aca879a199a575979529d6e08519a8d3b84"
+  "standalone_sha256": "64fd74a271b181817d9b8ed1dfbfeacbf18991b29a996d4fe23862aa1cf05e16",
+  "note": "The notebook hash identifies the last extracted source snapshot. Subsequent fixes are maintained in the standalone source."
 }

@@ -11,6 +11,61 @@ import time
 import traceback
 
 
+def check_stream_lighting(core,view,pv,np,report_path):
+    """Exercise the actual Tab 4 rebuild and cached-display paths on the GPU."""
+    paint=view.paint;view.paint=lambda:None
+    sphere=pv.Sphere(radius=.65,theta_resolution=32,phi_resolution=24);sphere['mz']=np.zeros(sphere.n_points)
+    angle=np.linspace(0,4*np.pi,160)
+    points=np.column_stack((.85*np.cos(angle),.85*np.sin(angle),np.linspace(-.8,.8,len(angle))))
+    lines=pv.PolyData(points,lines=np.r_[len(points),np.arange(len(points))]);lines['mz']=np.zeros(len(points))
+    box=pv.ImageData(dimensions=(3,3,3),origin=(-1,-1,-1),spacing=(1,1,1))
+    view.plotter=pv.Plotter(off_screen=True,window_size=(600,420),shape=(1,2),col_weights=[.88,.12],border=False)
+    view.style=view.filter_settings()[1]
+    view.style.update(scales=False,bar=False,outline=False,seeds=False,opacity=1.,stream_opacity=1.,radius=.045,
+        line_width=5.,ambient_light=.15,colors='Blue → White → Red',background='#202020',
+        light=dict(core.LIGHT_DEFAULTS,height_m=1e-9,intensity=1.),
+        reflection=dict(core.REFLECTION_DEFAULTS,enabled=True,layer=80.,arrow=60.,sharpness=30.))
+    view.result=dict(grid=box,iso=sphere,streams=lines,seeds=pv.PolyData(),scalar_range=(-1.,1.),display_bounds=box.bounds,section=None)
+    def capture():
+        view.display_scene();view.plotter.render()
+        assert view.plotter.renderers[0].GetLights().GetNumberOfItems()==2
+        return np.asarray(view.plotter.screenshot(return_img=True)).copy()
+    def differs(a,b):return np.count_nonzero(np.max(np.abs(a.astype(float)-b.astype(float)),axis=2)>5)>50
+    try:
+        first=capture();actors={k:a[0] for k,a in view.actor_cache.items()}
+        view.style['light'].update(x_angle=65.,y_angle=110.);angled=capture()
+        assert differs(first,angled)
+        assert all(view.actor_cache[k][0] is actor for k,actor in actors.items())
+        view.style['light']['intensity']=0.;unlit=capture()
+        view.style['ambient_light']=.85;ambient=capture();assert differs(unlit,ambient)
+        view.style['ambient_light']=.15;view.style['light']['intensity']=1.
+        view.style['reflection']['enabled']=False;matte=capture()
+        view.style['reflection'].update(enabled=True,layer=100.,arrow=100.,sharpness=8.);gloss=capture()
+        assert differs(matte,gloss)
+        for kind in ('iso','streams'):
+            prop=view.actor_cache[kind][0].prop
+            assert prop.lighting and np.isclose(prop.specular,.85) and prop.specular_power==8.
+        for representation in ('Tubes','Lines'):
+            view.style['stream_style']=representation;capture()
+            view.actor_cache['iso'][0].visibility=False
+            view.style['light'].update(x_angle=0.,y_angle=0.);before=capture()
+            view.style['light'].update(x_angle=85.,y_angle=125.);after=capture();assert differs(before,after),representation
+            if representation=='Lines':assert view.actor_cache['streams'][0].prop.GetRenderLinesAsTubes()
+        angle=np.linspace(0,2*np.pi,97);points=np.column_stack((.7*np.cos(angle),.7*np.sin(angle),np.zeros(len(angle))))
+        contour=pv.PolyData(points,lines=np.r_[len(points),np.arange(len(points))]);contour['mz']=np.zeros(len(points))
+        view.result=dict(view.result,iso=contour,streams=pv.PolyData(),section=dict(view='XY',mode='Plane',position=0.),slice=pv.Plane())
+        view.style['section_visual']=dict(show_slice=False,slice_opacity=.35)
+        view.style['light'].update(x_angle=0.,y_angle=0.);before=capture()
+        prop=view.actor_cache['iso'][0].prop;assert prop.lighting and prop.GetRenderLinesAsTubes()
+        view.style['light'].update(x_angle=85.,y_angle=125.);after=capture();assert differs(before,after),'slice contours'
+        folder=Path(report_path).resolve().parent;folder.mkdir(parents=True,exist_ok=True)
+        from PIL import Image
+        Image.fromarray(first).save(folder/'tab4-lighting-before.png');Image.fromarray(angled).save(folder/'tab4-lighting-after.png')
+    finally:
+        view.plotter.close();view.plotter=None;view.paint=paint;view.scene_valid=False
+        view.actor_cache={};view.outline_actor=view.bounds_actor=None
+
+
 def run_self_test(report_path, *, gpu=False):
     result = dict(passed=False, frozen=bool(getattr(sys,'frozen',False)),
                   architecture_bits=struct.calcsize('P')*8, machine=platform.machine(),
@@ -130,6 +185,26 @@ def run_self_test(report_path, *, gpu=False):
             assert title.getpixel((0,0))==(0,0,0) and np.asarray(title).max()==255
             stream.background_color.set('#ffffff');stream.outline_color.set('#303030')
             result['checks'].append('Tab 4 background/outline controls, display/export style snapshots and dark-background label contrast')
+            renderer=vtk.vtkRenderer()
+            lighting=core.SimpleNamespace(plotter=core.SimpleNamespace(renderers=[renderer]),mesh=mesh,
+                result=dict(display_bounds=(-1.,1.,-1.,1.,-1.,1.)),layer_fill_actors={},
+                style=dict(light=dict(core.LIGHT_DEFAULTS),ambient_light=.2,
+                    reflection=dict(core.REFLECTION_DEFAULTS,enabled=True,layer=80.,arrow=60.,sharpness=77.)),
+                actor_cache={k:(pv.Actor(),False) for k in ('iso','streams','arrows')})
+            core.apply_stream_light_controls(lighting);assert renderer.GetLights().GetNumberOfItems()==2
+            old_position=lighting.scene_lights[0].GetPosition();renderer.RemoveAllLights()
+            lighting.style['light'].update(x_angle=65.,y_angle=110.,intensity=1.5)
+            core.apply_stream_light_controls(lighting)
+            assert renderer.GetLights().GetNumberOfItems()==2 and lighting.scene_lights[0].GetPosition()!=old_position
+            assert np.isclose(lighting.scene_lights[0].GetIntensity(),.85*1.5)
+            for actor,_ in lighting.actor_cache.values():actor.prop.lighting=False
+            core.apply_stream_reflection(lighting)
+            for kind,(actor,_) in lighting.actor_cache.items():
+                assert actor.prop.lighting and np.isclose(actor.prop.ambient,.2) and np.isclose(actor.prop.diffuse,.8)
+                assert np.isclose(actor.prop.specular,.64 if kind=='iso' else .48) and actor.prop.specular_power==77.
+            lighting.style['reflection']['enabled']=False;core.apply_stream_reflection(lighting)
+            assert all(a.prop.specular==0. and a.prop.lighting for a,_ in lighting.actor_cache.values())
+            result['checks'].append('Tab 4 restores scene lights after clearing and applies ambient/reflection to contours, streams and heads')
             assert stream.view_3d_group not in stream.section_groups and stream.view_3d_group.winfo_manager()=='pack'
             assert not any(isinstance(w,core.ttk.Combobox) and str(w.cget('textvariable'))==str(stream.camera_mode)
                 for group in stream.section_groups for w in descendants(group))
@@ -247,6 +322,8 @@ def run_self_test(report_path, *, gpu=False):
                 finally:
                     stream.plotter.close();stream.plotter=None;stream.paint=paint;stream.scene_valid=False
                     stream.actor_cache={};stream.outline_actor=stream.bounds_actor=None
+                check_stream_lighting(core,app.stream_tab,pv,np,report_path)
+                result['checks'].append('GPU lighting changes for cached surfaces, streamline tubes/lines and slice contours; intensity, ambient and reflections')
             assert not callbacks,callbacks
         result['passed']=True
     except Exception:

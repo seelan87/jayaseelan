@@ -23,6 +23,12 @@ The shared gallery includes exact RGB **Red → White → Blue** and
 **Blue → White → Red** ramps. The selected preset drives both field colors and
 the corresponding color bar in views and exports.
 
+Tab 4's ambient light, light angles/height, intensity and reflection controls
+apply to streamline tubes/lines, arrowheads, contour surfaces and slice contours.
+**Contour / layer reflection** controls contours and fills;
+**Streamline / arrow reflection** controls streamlines and their heads.
+Lighting remains active across frame/representation changes and exports.
+
 ## Download and run
 
 1. Open [the latest Windows release](https://github.com/seelan87/jayaseelan/releases/latest).
@@ -75,7 +81,7 @@ exercise GPU rendering on a computer with suitable graphics hardware.
 
 `src/mumax_app/core.py` contains the current notebook application's complete GUI
 and analysis code, with an import-safe launcher and portable converter discovery.
-The notebook remains available separately and is not required by this build.
+The original notebook is not required by this build.
 ParaView preset notices and bundled dependency licenses are included in the build.
 No project-wide open-source license has been selected for the application code.
 

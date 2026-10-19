@@ -3524,7 +3524,7 @@ def reflection_control_settings(view):
     return values
 
 
-def add_reflection_controls(view,parent,changed):
+def add_reflection_controls(view,parent,changed,layer_label='Layer reflection (%)',arrow_label='Arrow reflection (%)'):
     view.reflection_enabled=tk.BooleanVar(master=parent,value=False)
     for attribute,initial in (('layer_reflection','25'),('arrow_reflection','25'),
                                ('reflection_sharpness','40'),('arrow_transparency','0')):
@@ -3532,10 +3532,10 @@ def add_reflection_controls(view,parent,changed):
     frame=ttk.LabelFrame(parent,text='Reflection / transparency',padding=5)
     frame.pack(fill='x',pady=5)
     ttk.Checkbutton(frame,text='Light reflection',variable=view.reflection_enabled,command=changed).pack(anchor='w')
-    for label,attribute,low,high in (('Layer reflection (%)','layer_reflection',0,100),
-        ('Arrow reflection (%)','arrow_reflection',0,100),('Highlight sharpness','reflection_sharpness',1,128),
+    for label,attribute,low,high in ((layer_label,'layer_reflection',0,100),
+        (arrow_label,'arrow_reflection',0,100),('Highlight sharpness','reflection_sharpness',1,128),
         ('Arrow transparency (%)','arrow_transparency',0,100)):
-        ttk.Label(frame,text=label).pack(anchor='w')
+        ttk.Label(frame,text=label,wraplength=250).pack(anchor='w')
         row=ttk.Frame(frame);row.pack(fill='x')
         variable=getattr(view,attribute)
         ttk.Scale(row,from_=low,to=high,variable=variable,command=lambda value:changed()).pack(side='left',fill='x',expand=True)
@@ -3585,6 +3585,9 @@ def apply_stream_reflection(view):
         actor,_=item
         target='arrow' if kind in ('arrows','streams') else 'layer'
         if kind=='arrows':actor.prop.opacity=opacity
+        if kind in ('iso','streams','arrows'):
+            actor.prop.lighting=True;actor.prop.ambient=ambient;actor.prop.diffuse=1-ambient
+            actor.prop.SetInterpolationToPhong()
         if actor.prop.lighting:
             actor.prop.specular=reflection_specular(settings,target,ambient)
             actor.prop.specular_power=settings['sharpness']
@@ -3783,7 +3786,10 @@ def apply_stream_light_controls(view):
             light=vtk.vtkLight();light.SetLightTypeToSceneLight();light.SetPositional(False)
             renderer.AddLight(light);view.scene_lights.append(light)
     values=light_geometry(view.result['display_bounds'],view.style.get('light',LIGHT_DEFAULTS),view.mesh['x']['unit'])
+    # Plotter.clear() removes lights even when this same plotter is reused.
+    renderer.AutomaticLightCreationOff()
     for light,position,intensity in zip(view.scene_lights,values['positions'],(.85,.2)):
+        if not renderer.GetLights().IsItemPresent(light):renderer.AddLight(light)
         light.SetPosition(*position);light.SetFocalPoint(*values['focal']);light.SetIntensity(intensity*values['intensity'])
 
 
@@ -7153,7 +7159,8 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
         ambient_spin.bind('<Return>',lambda event:self.schedule());ambient_spin.bind('<FocusOut>',lambda event:self.schedule())
 
         add_light_controls(self,lighting,self.schedule)
-        add_reflection_controls(self,lighting,self.schedule)
+        add_reflection_controls(self,lighting,self.schedule,
+            layer_label='Contour / layer reflection (%)',arrow_label='Streamline / arrow reflection (%)')
 
     def pick_color(self,variable):
         from tkinter import colorchooser
@@ -7430,14 +7437,14 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
             if actor is not None:self.actor_cache['slice']=actor
         surface=self.result['iso']
         if surface.n_points:
-            plane=bool(section and section['mode']=='Plane')
+            line_contour=bool(getattr(surface,'n_lines',0))
             color=self.style['contour_color']
             extra={} if color=='By component' else dict(color=color.lower(),colored=False)
             representation=self.style['contour_style']
-            self.actor_cache['iso']=add(surface,opacity=self.style['opacity'],smooth_shading=self.style['smooth_normals'],
+            self.actor_cache['iso']=add(surface,opacity=self.style['opacity'],smooth_shading=self.style['smooth_normals'] and not line_contour,
                 style='wireframe' if representation=='Wireframe' else 'surface',show_edges=representation=='Surface with edges',
                 line_width=max(1,self.style['line_width']),ambient=.35,diffuse=.75,specular=.25,specular_power=25,
-                lighting=not plane,**extra)
+                lighting=True,render_lines_as_tubes=line_contour or representation!='Surface',**extra)
         lines=self.result['streams']
         if lines.n_points:
             if self.style['stream_style']=='Tubes':
@@ -7446,8 +7453,8 @@ class StreamVolumeControlsBase(StreamIsoViewBase):
                     self.tube_cache=(tube_key,lines.tube(radius=self.style['radius'],n_sides=self.style['tube_sides']))
                 data=self.tube_cache[1]
             else:data=lines
-            self.actor_cache['streams']=add(data,opacity=self.style['stream_opacity'],line_width=self.style['line_width'],smooth_shading=True,
-                ambient=.35,diffuse=.75,specular=.25,specular_power=25)
+            self.actor_cache['streams']=add(data,opacity=self.style['stream_opacity'],line_width=self.style['line_width'],smooth_shading=self.style['stream_style']!='Lines',
+                ambient=.35,diffuse=.75,specular=.25,specular_power=25,render_lines_as_tubes=self.style['stream_style']=='Lines')
             if self.style['arrows']['show']:
                 head_geometry={k:v for k,v in self.style['arrows'].items() if k not in ('show','color')}
                 arrow_key=(id(lines),json.dumps(head_geometry,sort_keys=True),self.style['radius'])
