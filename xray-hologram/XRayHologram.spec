@@ -26,7 +26,7 @@ if zlib.is_file():binaries.append((str(zlib),'.'))
 hiddenimports=['matplotlib.backends.backend_tkagg','matplotlib.backends.backend_agg',
     'PIL._tkinter_finder','tkinter.simpledialog','imageio.plugins.ffmpeg','imageio_ffmpeg',
     'scipy.spatial._ckdtree','skimage.feature','skimage.segmentation',
-    'cupy','cupy.cuda','cupy.cuda.nvrtc','cupy.cuda.cufft','cupy.fft','fastrlock']
+    'cupy','cupy.cuda','cupy.cuda.nvrtc','cupy.cuda.cufft','cupy.fft','fastrlock','fastrlock.rlock']
 hiddenimports+=collect_submodules('cupy_backends')
 hiddenimports+=collect_submodules('cupy',filter=lambda name:'.tests' not in name)
 a=Analysis([str(project/'launcher.py')],pathex=[str(project/'src')],datas=datas,
