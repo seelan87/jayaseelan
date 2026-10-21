@@ -1,0 +1,11 @@
+{
+  "notebook": "finalized_fast.ipynb",
+  "source_sha256": "bc20c21ba549dc829fede6b5825392b2a873be687896a0008baad3ff992aaec7",
+  "packaged_source_sha256": "4477cdcf809ccef0ba57e05aac7e7cc996a9e55155549fe0f72f83b04657984f",
+  "adaptations": [
+    "Launcher owns Tk mainloop",
+    "Discover bundled CUDA DLLs and headers"
+  ],
+  "platform": "Windows 11 x64",
+  "tabs": 15
+}
