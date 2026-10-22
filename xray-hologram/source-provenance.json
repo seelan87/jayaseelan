@@ -1,7 +1,7 @@
 {
-  "notebook": "finalized_fast.ipynb",
-  "source_sha256": "bc20c21ba549dc829fede6b5825392b2a873be687896a0008baad3ff992aaec7",
-  "packaged_source_sha256": "4477cdcf809ccef0ba57e05aac7e7cc996a9e55155549fe0f72f83b04657984f",
+  "notebook": "finalized_2d_analysis.ipynb",
+  "source_sha256": "4ea1bee46319cea4aa41929c733110525fb52348ba58c11e3f99e21227700fe8",
+  "packaged_source_sha256": "b5b180d67d8fe67621ca8f0ba88fa8fa8daf9bc6abbc502381be6b617b1b7104",
   "adaptations": [
     "Launcher owns Tk mainloop",
     "Discover bundled CUDA DLLs and headers"

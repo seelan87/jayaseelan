@@ -17,6 +17,9 @@ concurrency:
 
 jobs:
   build:
+    # Same-repository pushes already build the exact branch. Avoid running the
+    # large CUDA bundle twice when that branch also has an open pull request.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: windows-2022
     timeout-minutes: 45
     defaults:

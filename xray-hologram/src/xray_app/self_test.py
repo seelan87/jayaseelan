@@ -82,6 +82,12 @@ def run_self_test(report_path):
             app.magnet_fix_button.invoke();app.new_upload()
             yy,xx=np.indices((81,81),dtype=float)
             crop=.15+.7*np.exp(-.5*(((xx-40)/7)**2+((yy-42)/9)**2))
+            # Fits now record selected-component normalization provenance.
+            app.recons=crop[None].copy();app.real_recons=app.recons.copy()
+            app.imag_recons=app.recons.copy();app.amplitude_recons=app.recons.copy()
+            app.phase_recons=np.zeros_like(app.recons)
+            app.complex_recons=app.recons+1j*app.recons
+            app.roi_resolution=(81,81)
             app._tab10_roi4_stack=crop[None].copy();app._tab10_roi4_scale=(2.,3.)
             app._tab10_roi4_coords=dict(xmin=0,xmax=80,ymin=0,ymax=80)
             app._tab11_primary_stack=crop[None].copy();app._tab11_primary_ready=True
@@ -108,6 +114,8 @@ def run_self_test(report_path):
             with Image.open(tmp/'figure.png') as im:
                 check(im.width>100 and im.height>100,'Scientific figure PNG export')
                 im.verify()
+            from xray_app.analysis_self_test import run_analysis_checks
+            run_analysis_checks(core,app,root,check,tmp)
             ffmpeg=Path(imageio_ffmpeg.get_ffmpeg_exe())
             check(ffmpeg.is_file(),'FFmpeg is bundled and discoverable')
             with imageio.get_writer(tmp/'movie.mp4',fps=3,format='ffmpeg',macro_block_size=None) as writer:

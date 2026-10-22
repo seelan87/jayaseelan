@@ -141,6 +141,7 @@ def _auto_open_export(function):
         owner = parent is None
         state = parent if parent is not None else {'files': set(), 'requested': set(), 'failed': False}
         if owner:
+            state['legend_context'] = _legend_export_context(function, args)
             _export_action_state.current = state
         try:
             return function(*args, **kwargs)
@@ -165,6 +166,1473 @@ def _auto_open_export(function):
     return wrapped
 
 
+import weakref as _legend_weakref
+import re as _legend_re
+
+
+_legend_hidden_artists = _legend_weakref.WeakKeyDictionary()
+
+
+def _legend_axes(figure):
+    def descend(axis):
+        yield axis
+        for child in axis.child_axes:
+            yield from descend(child)
+    for axis in figure.axes:
+        yield from descend(axis)
+
+
+def _legend_tab_from_widget(owner, widget):
+    tabs = {str(tab): i + 1 for i, tab in enumerate(owner.nb.tabs()[:14])}
+    while widget is not None:
+        number = tabs.get(str(widget))
+        if number is not None:
+            return number
+        widget = getattr(widget, 'master', None)
+    return None
+
+
+def _legend_export_context(function, args):
+    owner = args[0] if args else globals().get('app')
+    owner = getattr(owner, 'app', owner)
+    if not hasattr(owner, 'nb'):
+        owner = globals().get('app')
+    if owner is None or not hasattr(owner, '_show_legends_vars'):
+        return None
+    name = function.__name__
+    # Historical function numbers predate insertion of the Domain Periodicity tab.
+    if name.startswith('_tab12_'):
+        number = 13
+    elif name.startswith('_tab13_'):
+        number = 14
+    else:
+        match = _legend_re.search(r'^_(?:tab|t)(\d+)(?:_|$)', name)
+        number = int(match.group(1)) if match else None
+        if number is None:
+            for prefix, value in (('_proc_', 6), ('_roi2_', 6), ('_lpa_', 7),
+                                  ('_pd_', 8), ('_pixel_cal_', 5), ('_support_', 3)):
+                if name.startswith(prefix):
+                    number = value
+                    break
+        if number is None:
+            number = owner.nb.index(owner.nb.select()) + 1
+    return (owner, number) if number in owner._show_legends_vars else None
+
+
+def _legend_figure_context(figure):
+    context = getattr(figure, '_show_legends_context', None)
+    if context is not None:
+        return context
+    owner = globals().get('app')
+    canvas = getattr(figure, 'canvas', None)
+    if owner is not None and hasattr(owner, '_show_legends_vars') and hasattr(canvas, 'get_tk_widget'):
+        number = _legend_tab_from_widget(owner, canvas.get_tk_widget())
+        if number is None and canvas.get_tk_widget().winfo_toplevel() is not owner.root:
+            # Dynamic-zoom windows belong to the tab that opened them.
+            number = owner.nb.index(owner.nb.select()) + 1
+        if number is not None:
+            if number not in owner._show_legends_vars:
+                return None
+            context = (owner, number)
+            figure._show_legends_context = context
+            return context
+    state = getattr(_export_action_state, 'current', None)
+    context = state.get('legend_context') if state else None
+    if context is not None:
+        figure._show_legends_context = context
+    return context
+
+
+def _legend_apply_figure(figure):
+    context = _legend_figure_context(figure)
+    if context is None:
+        return
+    owner, number = context
+    show = bool(owner._show_legends_vars[number].get())
+    artists = list(figure.texts) + list(figure.legends)
+    for axis in _legend_axes(figure):
+        # Colorbar labels, ticks, and any scientific scale annotations stay visible.
+        if getattr(axis, '_colorbar', None) is not None:
+            continue
+        artists.extend([axis.title, axis._left_title, axis._right_title])
+        artists.extend(axis.texts)
+        if axis.get_legend() is not None:
+            artists.append(axis.get_legend())
+    for artist in artists:
+        if not show:
+            if artist not in _legend_hidden_artists:
+                _legend_hidden_artists[artist] = artist.get_visible()
+            if artist.get_visible():
+                artist.set_visible(False)
+        elif artist in _legend_hidden_artists:
+            original = _legend_hidden_artists.pop(artist)
+            if artist.get_visible() != original:
+                artist.set_visible(original)
+
+
+def _legend_refresh_tab(owner, number):
+    for canvas in list(_figure_navigation_canvases):
+        figure = canvas.figure
+        if _legend_figure_context(figure) == (owner, number):
+            _legend_apply_figure(figure)
+            canvas.draw_idle()
+
+
+def _legend_walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _legend_walk(child)
+
+
+def _legend_find_text(tab, text):
+    for widget in _legend_walk(tab):
+        if 'text' in widget.keys() and str(widget.cget('text')) == text:
+            return widget
+    raise RuntimeError('Show Legends control panel not found: ' + text)
+
+
+def _legend_canvas_window(canvas):
+    for item in canvas.find_all():
+        if canvas.type(item) == 'window':
+            return canvas.nametowidget(canvas.itemcget(item, 'window'))
+    raise RuntimeError('Show Legends control canvas has no panel')
+
+
+def _legend_insert_control(owner, number, host, horizontal=False):
+    variable = tk.BooleanVar(master=owner.root, value=True)
+    owner._show_legends_vars[number] = variable
+    setattr(owner, f'tab{number}_show_legends_var', variable)
+    button = ttk.Checkbutton(host, text='Show Legends', variable=variable)
+    packed = host.pack_slaves()
+    gridded = host.grid_slaves()
+    if packed:
+        button.pack(side='left' if horizontal else 'top', anchor='w',
+                    padx=5, pady=4, before=packed[0])
+    elif gridded:
+        columns, rows = host.grid_size()
+        weights = [host.grid_rowconfigure(row) for row in range(rows)]
+        for widget in gridded:
+            widget.grid_configure(row=int(widget.grid_info()['row']) + 1)
+        for row, config in enumerate(weights):
+            host.grid_rowconfigure(row + 1, **config)
+        host.grid_rowconfigure(0, weight=0, minsize=0, pad=0, uniform='')
+        button.grid(row=0, column=0, columnspan=max(1, columns), sticky='w', padx=5, pady=4)
+    else:
+        button.pack(anchor='w', padx=5, pady=4)
+    variable.trace_add('write', lambda *_: _legend_refresh_tab(owner, number))
+    owner._show_legends_checks[number] = button
+
+
+def _install_figure_legend_controls(owner):
+    owner._show_legends_vars = {}
+    owner._show_legends_checks = {}
+    tabs = [owner.root.nametowidget(tab) for tab in owner.nb.tabs()[:14]]
+    hosts = {
+        1: _legend_canvas_window(owner.data_control_canvas),
+        2: _legend_find_text(tabs[1], 'Show current reconstruction').master,
+        3: owner.support_ctrl_inner,
+        4: _legend_find_text(tabs[3], 'Component').master,
+        5: _legend_canvas_window(_legend_find_text(tabs[4], 'PIXEL CALIBRATION — CONTROLS').winfo_children()[0]),
+        6: owner._proc_control_frame,
+        7: _legend_find_text(tabs[6], 'ROI2 FROM TAB-6').master,
+        8: owner._tab8_control_pane,
+        9: _legend_find_text(tabs[8], 'ROI-SELECTION'),
+        10: _legend_find_text(tabs[9], 'ROI4 SOURCE').master,
+        11: _legend_find_text(tabs[10], 'PRIMARY ROI SOURCE / ROI SELECTION').master,
+        12: owner.domain_periodicity.control_canvas.master,
+        13: _legend_find_text(tabs[12], 'HDF5 FILE CONTROLS'),
+        14: _legend_find_text(tabs[13], 'FRC FILE / ANALYSIS CONTROLS'),
+    }
+    for number, host in hosts.items():
+        _legend_insert_control(owner, number, host, horizontal=number in (2, 4, 7))
+    for canvas in list(_figure_navigation_canvases):
+        _legend_figure_context(canvas.figure)
+    # Figures built specifically for exports retain their originating tab even
+    # when subsequent savefig calls temporarily replace their canvas backend.
+    from matplotlib.figure import Figure
+    if not hasattr(Figure, '_show_legends_original_init'):
+        Figure._show_legends_original_init = Figure.__init__
+    def initialize(figure, *args, **kwargs):
+        Figure._show_legends_original_init(figure, *args, **kwargs)
+        state = getattr(_export_action_state, 'current', None)
+        context = state.get('legend_context') if state else None
+        if context is not None:
+            figure._show_legends_context = context
+    Figure.__init__ = initialize
+
+
+def _install_tab6_pip_control(owner):
+    label = _legend_find_text(owner._proc_control_frame, 'VIEW')
+    owner.tab6_pip_var = tk.BooleanVar(master=owner.root, value=True)
+    owner.tab6_pip_check = ttk.Checkbutton(label.master, text='PIP', variable=owner.tab6_pip_var,
+                                          command=owner.update_processing_view)
+    owner.tab6_pip_check.pack(anchor='w', padx=10, pady=(8, 0), before=label)
+
+
+def _tab6_pip_enabled(owner):
+    variable = getattr(owner, 'tab6_pip_var', None)
+    return bool(variable is not None and variable.get())
+
+
+def _tab6_prepare_pip(figure):
+    context = _legend_figure_context(figure)
+    if context is None or context[1] != 6:
+        return
+    owner = context[0]
+    # Only the processed primary image and its exports receive this preview.
+    if figure is not getattr(owner, '_proc_fig', None) and getattr(figure, '_intensity_owner', None) is not owner:
+        return
+    view = owner.view_var.get()
+    inset = getattr(figure, '_tab6_pip_axes', None)
+    visible = _tab6_pip_enabled(owner) and view in ('FFT', 'IFFT') and bool(getattr(owner, 'roi_resolution_applied', False))
+    if not visible:
+        if inset is not None:
+            inset.set_visible(False)
+        return
+    parent = next((axis for axis in figure.axes if axis.images and not getattr(axis, '_colorbar', None)), None)
+    if parent is None:
+        return
+    if inset is None or inset not in parent.child_axes:
+        # sqrt(0.10) of each dimension makes the preview 10% of the image area.
+        edge = float(np.sqrt(.10))
+        inset = parent.inset_axes([.025, .025, edge, edge], zorder=40)
+        inset.set_label('Tab 6 PIP preview')
+        inset.set_xticks([]); inset.set_yticks([])
+        for spine in inset.spines.values():
+            spine.set_edgecolor('white'); spine.set_linewidth(1.)
+        figure._tab6_pip_axes = inset
+        figure._tab6_pip_image = inset.imshow(np.zeros((2, 2)), origin='lower', aspect='auto',
+            cmap=owner.colormap_var.get(), vmin=0., vmax=1., interpolation='nearest')
+        figure._tab6_pip_caption = inset.text(.04, .96, '', transform=inset.transAxes,
+            va='top', ha='left', fontsize=8, color='white',
+            bbox=dict(facecolor='black', alpha=.6, edgecolor='none', pad=1.5))
+        figure._tab6_pip_key = None
+    inset.set_visible(True)
+    source = parent.images[0].get_array()
+    key = (id(source), view, float(owner.fft_mask_var.get()))
+    if getattr(figure, '_tab6_pip_key', None) != key:
+        values = np.asarray(np.ma.filled(source, 0.), dtype=float)
+        spectrum, preview = _proc_fft(owner, values)
+        if view == 'IFFT':
+            masked, _ = _proc_fft_mask(owner, spectrum, owner.fft_mask_var.get())
+            inverse = np.abs(_compute_fft2(np.fft.ifftshift(masked), inverse=True))
+            lo, hi = float(np.nanmin(inverse)), float(np.nanmax(inverse))
+            preview = (inverse-lo)/(hi-lo) if hi > lo else np.zeros_like(inverse)
+        figure._tab6_pip_image.set_data(preview)
+        figure._tab6_pip_image.set_extent((0., preview.shape[1], 0., preview.shape[0]))
+        inset.set_xlim(0., preview.shape[1]); inset.set_ylim(0., preview.shape[0])
+        figure._tab6_pip_caption.set_text(view)
+        # Keep the previous array alive so its identity cannot be reused for a
+        # different frame before the next preview-cache lookup.
+        figure._tab6_pip_source = source
+        figure._tab6_pip_key = key
+    figure._tab6_pip_image.set_cmap(owner.colormap_var.get())
+
+
+def _tab11_bind_colorbar(owner, image):
+    """Keep the gradient, ticks and callbacks attached to the current ROI image."""
+    bar = getattr(owner, '_tab11_cbar', None)
+    if bar is None or bar.ax not in owner.tab11_fig.axes:
+        bar = owner.tab11_fig.colorbar(image, ax=owner.tab11_ax_primary, fraction=.046, pad=.04)
+        owner._tab11_cbar = bar
+    else:
+        previous = bar.mappable
+        callback = getattr(previous, 'colorbar_cid', None)
+        if callback is not None:
+            previous.callbacks.disconnect(callback)
+            previous.colorbar_cid = None
+        previous.colorbar = None
+        # Axes.clear() replaces the image. update_normal alone leaves callback
+        # ownership on the removed image, so explicitly rebind the new artist.
+        bar.update_normal(image)
+        image.colorbar = bar
+        image.colorbar_cid = image.callbacks.connect('changed', bar.update_normal)
+    bar.set_label('Phase (rad)' if _intensity_raw(owner) and _tab4_component_confirmed(owner) == 'Phase'
+                  else 'Intensity (a.u.)')
+    return bar
+
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+"""Direct area integration and second moments; no line profiles or Gaussian fits."""
+
+
+def _ii2d_measure(primary, bounds, scale, background='Surrounding plane', fraction=.5,
+                  polarity='Auto', valid_mask=None, exclude=()):
+    image = np.asarray(primary, dtype=np.float64)
+    sx, sy = map(float, scale)
+    if image.ndim != 2 or min(sx, sy) <= 0 or not np.isfinite([sx,sy]).all():
+        raise ValueError('A 2D image and positive X/Y physical pixel dimensions are required.')
+    x0,x1,y0,y1 = [int(bounds[k]) for k in ('xmin','xmax','ymin','ymax')]
+    if not (0 <= x0 <= x1 < image.shape[1] and 0 <= y0 <= y1 < image.shape[0]):
+        raise ValueError('The selected 2D ROI is outside the processed primary image.')
+    if not 0 < float(fraction) < 1:
+        raise ValueError('The area threshold must lie strictly between 0 and 1.')
+    if polarity not in ('Auto','Bright','Dark'):
+        raise ValueError('Choose Auto, Bright or Dark contrast polarity.')
+    valid = np.isfinite(image)
+    if valid_mask is not None:
+        valid &= np.asarray(valid_mask,dtype=bool)
+    width,height = x1-x0+1,y1-y0+1
+    # An exterior annulus stays outside the feature ROI. Other selected ROIs
+    # cannot contaminate the background estimate for a multi-ROI measurement.
+    band = max(2,int(round(.15*min(width,height))))
+    bx0,bx1 = max(0,x0-band),min(image.shape[1],x1+band+1)
+    by0,by1 = max(0,y0-band),min(image.shape[0],y1+band+1)
+    yy,xx = np.mgrid[by0:by1,bx0:bx1]
+    sample = valid[by0:by1,bx0:bx1].copy()
+    inside = (xx>=x0)&(xx<=x1)&(yy>=y0)&(yy<=y1)
+    if background == 'ROI border median':
+        edge = max(1,int(round(.08*min(width,height))))
+        sample &= inside & ((xx<x0+edge)|(xx>x1-edge)|(yy<y0+edge)|(yy>y1-edge))
+    else:
+        sample &= ~inside
+        for other in exclude:
+            sample &= ~((xx>=other['xmin'])&(xx<=other['xmax'])&(yy>=other['ymin'])&(yy<=other['ymax']))
+    if np.count_nonzero(sample) < 12:
+        raise ValueError('Fewer than 12 valid surrounding pixels. Enlarge the primary image, reduce the ROI, or explicitly select ROI border median.')
+    cx,cy = (x0+x1+1)*sx/2.,(y0+y1+1)*sy/2.
+    ux,uy = max(width*sx/2.,sx),max(height*sy/2.,sy)
+    values = image[by0:by1,bx0:bx1][sample]
+    px,py = (xx[sample]+.5)*sx,(yy[sample]+.5)*sy
+    if len(values)>30000:
+        take = np.linspace(0,len(values)-1,30000,dtype=int)
+        values,px,py = values[take],px[take],py[take]
+    design = np.column_stack([np.ones(len(values)),(px-cx)/ux,(py-cy)/uy])
+    keep = np.ones(len(values),dtype=bool)
+    if background == 'Surrounding plane':
+        for _ in range(5):
+            coeff,_,rank,_ = np.linalg.lstsq(design[keep],values[keep],rcond=None)
+            if rank != 3:
+                raise ValueError('Surrounding pixels cannot define a background plane. Choose surrounding median explicitly.')
+            residual = values-design@coeff
+            center = float(np.median(residual[keep]))
+            noise = 1.4826*float(np.median(np.abs(residual[keep]-center)))
+            tolerance = max(3.5*noise,np.finfo(float).eps*max(1.,float(np.max(np.abs(values))))*100)
+            clipped = np.abs(residual-center)<=tolerance
+            if np.count_nonzero(clipped)<12 or np.array_equal(clipped,keep):
+                break
+            keep=clipped
+        coeff,_,rank,_ = np.linalg.lstsq(design[keep],values[keep],rcond=None)
+    elif background in ('Surrounding median','ROI border median'):
+        coeff=np.asarray([np.median(values),0.,0.])
+    else:
+        raise ValueError('Unknown 2D background method: '+str(background))
+    residual_bg=values[keep]-design[keep]@coeff
+    noise=1.4826*float(np.median(np.abs(residual_bg-np.median(residual_bg))))
+    yy,xx=np.mgrid[y0:y1+1,x0:x1+1]
+    xnm,ynm=(xx+.5)*sx,(yy+.5)*sy
+    plane=coeff[0]+coeff[1]*(xnm-cx)/ux+coeff[2]*(ynm-cy)/uy
+    crop=image[y0:y1+1,x0:x1+1]
+    finite=valid[y0:y1+1,x0:x1+1]
+    if not finite.any():
+        raise ValueError('Selected 2D ROI has no valid pixels.')
+    contrast=crop-plane
+    positive=float(np.max(contrast[finite])); negative=float(-np.min(contrast[finite]))
+    sign=(-1. if negative>positive else 1.) if polarity=='Auto' else (1. if polarity=='Bright' else -1.)
+    weights=np.where(finite,np.maximum(sign*contrast,0.),0.)
+    peak=float(weights.max())
+    tolerance=np.finfo(float).eps*max(1.,float(np.max(np.abs(crop[finite]))))*100
+    if peak<=tolerance:
+        weights[:]=0.; peak=0.
+    total=float(weights.sum())
+    feature=(weights>=float(fraction)*peak)&finite if peak>0 else np.zeros(crop.shape,dtype=bool)
+    area=float(np.count_nonzero(feature)*sx*sy)
+    if total>0:
+        centroid_x=float(np.sum(weights*xnm)/total); centroid_y=float(np.sum(weights*ynm)/total)
+        dx,dy=xnm-centroid_x,ynm-centroid_y
+        covariance=np.array([[np.sum(weights*dx*dx),np.sum(weights*dx*dy)],
+                             [np.sum(weights*dx*dy),np.sum(weights*dy*dy)]])/total
+        eigenvalues,eigenvectors=np.linalg.eigh(covariance)
+        eigenvalues=np.maximum(eigenvalues,0.)
+        rms=2.*float(np.sqrt(eigenvalues.sum()))
+        minor,major=2.*np.sqrt(eigenvalues)
+        angle=float(np.degrees(np.arctan2(eigenvectors[1,1],eigenvectors[0,1]))%180.)
+    else:
+        centroid_x=centroid_y=rms=major=minor=angle=np.nan
+    status=[]
+    if not finite.all(): status.append('masked pixels excluded')
+    if peak<=tolerance: status.append('no positive contrast for size')
+    elif noise>0 and peak<5.*noise: status.append('low contrast: peak/background MAD < 5')
+    if feature[0].any() or feature[-1].any() or feature[:,0].any() or feature[:,-1].any():
+        status.append('threshold feature reaches ROI boundary')
+    record=dict(ii2d_integrated=float(np.sum(contrast[finite])*sx*sy),
+        ii2d_positive_contrast_integral=total*sx*sy, ii2d_rms_diameter_nm=float(rms),
+        ii2d_feature_area_nm2=area,ii2d_equivalent_diameter_nm=2.*float(np.sqrt(area/np.pi)),
+        ii2d_centroid_x_nm=centroid_x,ii2d_centroid_y_nm=centroid_y,
+        ii2d_major_rms_width_nm=float(major),ii2d_minor_rms_width_nm=float(minor),
+        ii2d_principal_angle_deg=angle,ii2d_polarity='Bright' if sign>0 else 'Dark',
+        ii2d_background_method=background,ii2d_background_offset=float(coeff[0]),
+        ii2d_background_slope_x_per_nm=float(coeff[1]/ux),ii2d_background_slope_y_per_nm=float(coeff[2]/uy),
+        ii2d_background_origin_x_nm=cx,ii2d_background_origin_y_nm=cy,
+        ii2d_background_noise_mad=noise,ii2d_background_samples=int(keep.sum()),
+        ii2d_area_threshold_fraction=float(fraction),ii2d_threshold_contrast=float(fraction)*peak,
+        ii2d_valid_pixels=int(finite.sum()),ii2d_pixel_area_nm2=sx*sy,
+        ii2d_roi_area_nm2=float(finite.sum()*sx*sy),ii2d_status='; '.join(status) or 'ok',
+        ii2d_size_definition='2*sqrt(weighted variance X + weighted variance Y); positive polarity-aligned contrast in full selected ROI',
+        ii2d_integral_definition='signed sum(I-background)*dx*dy over all valid selected ROI pixels; no clipping',
+        ii2d_size_uncertainty='not estimated; resampled pixels are correlated',
+        roi_xmin=x0,roi_xmax=x1,roi_ymin=y0,roi_ymax=y1,scale_x_nm_per_px=sx,scale_y_nm_per_px=sy)
+    return record,dict(crop=crop,background=plane,contrast=contrast,weights=weights,feature=feature,valid=finite,
+        core_support=finite.copy())
+
+
+def _ii2d_outer_circularity(component, scale):
+    """4*pi*A/P^2 of the filled outer contour in physical X/Y coordinates."""
+    from scipy.ndimage import binary_fill_holes
+    from skimage.measure import find_contours
+    sx,sy=map(float,scale)
+    outer=binary_fill_holes(np.asarray(component,dtype=bool))
+    contours=find_contours(np.pad(outer,1),.5)
+    if not contours:return np.nan,0.,0.
+    contour=max(contours,key=len)
+    x,y=contour[:,1]*sx,contour[:,0]*sy
+    xnext,ynext=np.roll(x,-1),np.roll(y,-1)
+    area=.5*abs(float(np.sum(x*ynext-xnext*y)))
+    perimeter=float(np.sum(np.hypot(xnext-x,ynext-y)))
+    circularity=4.*np.pi*area/perimeter**2 if perimeter>0 else np.nan
+    return float(np.clip(circularity,0.,1.)),area,perimeter
+
+
+def _ii2d_isolate_core(owner, tab, roi, frame, record, maps, scale):
+    """Retain one significant interior connected core; reject edge objects/noise."""
+    from scipy import ndimage
+
+    valid=np.asarray(maps['valid'],dtype=bool)
+    weights=np.asarray(maps['weights'],dtype=float)
+    signal=np.where(valid,weights,0.)
+    peak=0.;noise=max(float(record.get('ii2d_background_noise_mad',0.)),np.finfo(float).eps)
+    threshold=np.nan
+    edge=max(1,int(round(.04*min(valid.shape))))
+    minimum=max(12,int(np.ceil(.02*int(valid.sum()))))
+    minimum_circularity=_ii2d_detection_options(owner,tab)['minimum_outer_circularity']
+    rejected_shapes=[]
+    if not valid.any() or not np.isfinite(signal).any():
+        candidates=[]
+    else:
+        smooth=ndimage.gaussian_filter(signal,sigma=1.0,mode='nearest')
+        peak=float(np.max(smooth[valid]))
+        interior=valid.copy()
+        interior[:edge,:]=False;interior[-edge:,:]=False
+        interior[:,:edge]=False;interior[:,-edge:]=False
+        threshold=max(float(record.get('ii2d_area_threshold_fraction',.3))*peak,5.*noise)
+        # The smoothed map estimates peak contrast robustly; the feature mask
+        # itself applies C >= T to the unsmoothed background-subtracted data.
+        labels,count=ndimage.label((signal>=threshold)&valid,structure=np.ones((3,3),dtype=np.uint8))
+        center=np.array([(valid.shape[1]-1)/2.,(valid.shape[0]-1)/2.])
+        max_distance=.42*min(valid.shape)
+        candidates=[]
+        counts=np.bincount(labels.ravel())
+        candidate_ids=np.flatnonzero((counts>=minimum)&(counts<=.70*int(valid.sum())))
+        for label in candidate_ids[candidate_ids>0]:
+            component=labels==label
+            area=int(component.sum())
+            if area<minimum or area>.70*int(valid.sum()):continue
+            # Reject the complete component before cropping the margin. A
+            # clipped edge particle must never become a new interior object.
+            if not np.all(interior[component]):continue
+            if np.any(ndimage.binary_dilation(component)&~valid):continue
+            ys,xs=np.nonzero(component)
+            centroid=np.array([xs.mean(),ys.mean()])
+            if np.linalg.norm(centroid-center)>max_distance:continue
+            circularity,outer_area,perimeter=_ii2d_outer_circularity(component,scale)
+            if not np.isfinite(circularity) or circularity+1e-12<minimum_circularity:
+                rejected_shapes.append((circularity,outer_area,perimeter))
+                continue
+            candidates.append((float(np.sum(signal[component])),area,component,circularity,outer_area,perimeter))
+    if not candidates:
+        rejected=max(rejected_shapes,key=lambda value:value[0]) if rejected_shapes else (np.nan,np.nan,np.nan)
+        record.update(core_detected=False,ii2d_rms_diameter_nm=np.nan,
+            ii2d_feature_area_nm2=0.,ii2d_equivalent_diameter_nm=0.,
+            ii2d_centroid_x_nm=np.nan,ii2d_centroid_y_nm=np.nan,
+            ii2d_major_rms_width_nm=np.nan,ii2d_minor_rms_width_nm=np.nan,
+            ii2d_principal_angle_deg=np.nan,ii2d_core_pixels=0,
+            ii2d_core_detection_threshold=float(threshold),ii2d_core_peak_contrast=float(peak),
+            ii2d_threshold_contrast=float(threshold),
+            ii2d_core_min_area_pixels=int(minimum),ii2d_edge_margin_pixels=int(edge),
+            ii2d_outer_circularity=float(rejected[0]),ii2d_outer_area_nm2=float(rejected[1]),
+            ii2d_outer_perimeter_nm=float(rejected[2]),ii2d_minimum_outer_circularity=float(minimum_circularity),
+            ii2d_status=(f'no qualifying circular core: outer circularity {rejected[0]:.3f} < {minimum_circularity:.3f}'
+                if rejected_shapes else 'no core detected; edge particles and noise ignored'))
+        maps['core_support']=np.zeros_like(valid)
+        maps['feature']=np.zeros_like(valid)
+        return record,maps
+    # Prefer the component nearest the selected ROI center; use its integrated
+    # positive contrast to break ties. Edge components were excluded above.
+    selected=max(candidates,key=lambda item:(-np.linalg.norm(np.array([np.mean(np.nonzero(item[2])[1]),
+        np.mean(np.nonzero(item[2])[0])])-np.array([(valid.shape[1]-1)/2.,(valid.shape[0]-1)/2.])),item[0]))
+    component=selected[2]
+    area_mask=component
+    # The threshold-connected component is the feature mask M for the RMS
+    # moments; no exterior particles or background halo enter the size.
+    support=component&valid
+    sx,sy=map(float,scale)
+    x0,y0=int(record['roi_xmin']),int(record['roi_ymin'])
+    yy,xx=np.mgrid[y0:y0+valid.shape[0],x0:x0+valid.shape[1]]
+    xnm=(xx+.5)*sx;ynm=(yy+.5)*sy
+    contrast=np.asarray(maps['contrast'],float)
+    weights=np.where(support,np.asarray(maps['weights'],float),0.)
+    total=float(weights.sum())
+    if total>0:
+        cx=float(np.sum(weights*xnm)/total);cy=float(np.sum(weights*ynm)/total)
+        dx,dy=xnm-cx,ynm-cy
+        cov=np.array([[np.sum(weights*dx*dx),np.sum(weights*dx*dy)],
+                      [np.sum(weights*dx*dy),np.sum(weights*dy*dy)]])/total
+        vals,vecs=np.linalg.eigh(cov);vals=np.maximum(vals,0.)
+        widths=2.*np.sqrt(vals);angle=float(np.degrees(np.arctan2(vecs[1,1],vecs[0,1]))%180.)
+        rms=2.*float(np.sqrt(vals.sum()))
+    else:
+        cx=cy=rms=angle=np.nan;widths=np.array([np.nan,np.nan])
+    # Keep the signed 2D integral over the full selected ROI (computed in
+    # _ii2d_measure); restrict only size moments to the accepted core support.
+    record.update(ii2d_rms_diameter_nm=float(rms),
+        ii2d_feature_area_nm2=float(area_mask.sum()*sx*sy),
+        ii2d_equivalent_diameter_nm=float(2*np.sqrt(area_mask.sum()*sx*sy/np.pi)),
+        ii2d_centroid_x_nm=cx,ii2d_centroid_y_nm=cy,
+        ii2d_major_rms_width_nm=float(widths[1]),ii2d_minor_rms_width_nm=float(widths[0]),
+        ii2d_principal_angle_deg=angle,ii2d_core_pixels=int(support.sum()),
+        ii2d_core_detection_threshold=float(threshold),ii2d_core_peak_contrast=float(peak),
+        ii2d_threshold_contrast=float(threshold),
+        ii2d_core_min_area_pixels=int(minimum),ii2d_edge_margin_pixels=int(edge),
+        ii2d_outer_circularity=float(selected[3]),ii2d_outer_area_nm2=float(selected[4]),
+        ii2d_outer_perimeter_nm=float(selected[5]),ii2d_minimum_outer_circularity=float(minimum_circularity),
+        ii2d_size_definition='2*sqrt(weighted variance X + weighted variance Y); polarity-aligned contrast within accepted core mask',
+        core_detected=True,ii2d_status='core detected; edge particles and noise ignored')
+    maps['feature']=area_mask
+    maps['core_support']=support
+    return record,maps
+
+
+def _ii2d_detection_options(owner, tab):
+    variable=getattr(owner,f'tab{tab}_2d_minimum_outer_circularity_var',None)
+    minimum=float(variable.get()) if variable is not None else .70
+    if not np.isfinite(minimum) or not 0.<=minimum<=1.:
+        raise ValueError('Minimum Outer Circularity must be between 0 and 1.')
+    return {'minimum_area_fraction':.02,'minimum_peak_snr':5.,'edge_margin_fraction':.04,
+        'smoothing_sigma_px':1.0,'maximum_area_fraction':.70,'minimum_outer_circularity':minimum}
+
+
+def _ii2d_y2_choices(owner, tab):
+    return list(_II2D_SIGNAL_AXES)
+
+
+def _ii2d_enabled(owner, tab):
+    variable=getattr(owner,f'tab{tab}_integrated_intensity_2d_var',None)
+    return bool(variable is not None and variable.get())
+
+
+def _ii2d_source(owner, tab):
+    if tab==10:
+        primary=getattr(owner,'_tab9_roi1_stack',None)
+        bounds=getattr(owner,'_tab10_roi4_global_coords',None)
+        scale=getattr(owner,'_tab10_roi4_scale',None)
+        rois=[bounds] if bounds else []
+    else:
+        primary=getattr(owner,'_tab11_primary_stack',None)
+        scale=getattr(owner,'_tab11_scale_nm',None)
+        rois=list(getattr(owner,'_tab11_rois',[]))
+    if primary is None or not rois or scale is None:
+        raise ValueError('Fetch the processed primary ROI and confirm a feature ROI first.')
+    return primary,rois,scale
+
+
+def _ii2d_options(owner, tab):
+    return dict(background=getattr(owner,f'tab{tab}_2d_background_var').get(),
+        fraction=float(getattr(owner,f'tab{tab}_2d_area_fraction_var').get()),
+        polarity=getattr(owner,f'tab{tab}_2d_polarity_var').get())
+
+
+def _ii2d_store_display(owner, tab, frame, roi, record, maps):
+    primary,_,_=_ii2d_source(owner,tab)
+    signature=(id(primary),_ii2d_signature(owner,tab))
+    if getattr(owner,f'_tab{tab}_2d_display_signature',None)!=signature:
+        setattr(owner,f'_tab{tab}_2d_display_cache',{})
+        setattr(owner,f'_tab{tab}_2d_display_signature',signature)
+    cache=getattr(owner,f'_tab{tab}_2d_display_cache')
+    # Retain every calculated frame without retaining several float maps per
+    # frame. The mask and background coefficients reproduce its display.
+    cache[(int(frame),int(roi))]=(dict(record),maps['crop'].shape,
+        np.packbits(maps['feature'].ravel()),np.packbits(maps['valid'].ravel()))
+
+
+def _ii2d_display_data(owner, tab, frame, roi=0):
+    primary,rois,scale=_ii2d_source(owner,tab)
+    if getattr(owner,f'_tab{tab}_2d_display_signature',None)!=(id(primary),_ii2d_signature(owner,tab)):
+        return None
+    entry=getattr(owner,f'_tab{tab}_2d_display_cache',{}).get((int(frame),int(roi)))
+    if entry is None:return None
+    saved,shape,feature_bits,valid_bits=entry
+    record=dict(saved);bounds=rois[roi];sx,sy=scale
+    crop=primary[int(frame),bounds['ymin']:bounds['ymax']+1,bounds['xmin']:bounds['xmax']+1]
+    feature=np.unpackbits(feature_bits,count=int(np.prod(shape))).reshape(shape).astype(bool)
+    valid=np.unpackbits(valid_bits,count=int(np.prod(shape))).reshape(shape).astype(bool)
+    x=(np.arange(shape[1])+bounds['xmin']+.5)*sx-record['ii2d_background_origin_x_nm']
+    y=(np.arange(shape[0])+bounds['ymin']+.5)*sy-record['ii2d_background_origin_y_nm']
+    background=(record['ii2d_background_offset']+record['ii2d_background_slope_x_per_nm']*x[None,:]
+        +record['ii2d_background_slope_y_per_nm']*y[:,None])
+    record['field_mT']=_tab10_intensity_field(owner,int(frame))
+    return record,dict(crop=crop,background=background,contrast=crop-background,
+        feature=feature,valid=valid,core_support=feature)
+
+
+def _ii2d_uncalculated_preview(owner, tab, frame, roi=0):
+    primary,rois,_=_ii2d_source(owner,tab);bounds=rois[roi]
+    crop=primary[int(frame),bounds['ymin']:bounds['ymax']+1,bounds['xmin']:bounds['xmax']+1]
+    empty=np.zeros(crop.shape,dtype=bool)
+    record=dict(calculated=False,core_detected=False,ii2d_integrated=np.nan,
+        ii2d_rms_diameter_nm=np.nan,ii2d_centroid_x_nm=np.nan,ii2d_centroid_y_nm=np.nan,
+        ii2d_area_threshold_fraction=float(getattr(owner,f'tab{tab}_2d_area_fraction_var').get()),
+        ii2d_status='Frame not calculated; use MEASURE CURRENT ROI or TRACK-SELECTED FRAMES.')
+    return record,dict(crop=crop,contrast=np.zeros(crop.shape),feature=empty,valid=np.isfinite(crop),core_support=empty)
+
+
+def _ii2d_compute(owner, tab, frame, roi=0):
+    if _tab4_component_confirmed(owner)=='Phase':
+        raise ValueError('Direct 2D intensity needs Real, Imaginary or Amplitude. Wrapped Phase cannot be integrated as scalar intensity.')
+    primary,rois,scale=_ii2d_source(owner,tab)
+    cache=getattr(owner,f'_tab{tab}_2d_measurement_cache',None)
+    if cache is None:
+        cache={};setattr(owner,f'_tab{tab}_2d_measurement_cache',cache)
+    key=(id(primary),_ii2d_signature(owner,tab),int(frame),int(roi),repr(_tab10_intensity_field(owner,int(frame))))
+    if key in cache:
+        record,maps=cache.pop(key);cache[key]=(record,maps)
+        return dict(record),maps
+    image=np.asarray(primary[int(frame)],dtype=float)
+    mask=None
+    committed=bool(getattr(owner,'_tab6_analysis_rotation_committed',False))
+    for name in (('_tab6_finalized_mask','_tab6_display_mask') if committed else ('local_mask',)):
+        candidate=getattr(owner,name,None)
+        if candidate is not None and np.shape(candidate)==image.shape:
+            mask=candidate;break
+    record,maps=_ii2d_measure(image,rois[roi],scale,valid_mask=mask,
+        exclude=[bounds for i,bounds in enumerate(rois) if i!=roi],**_ii2d_options(owner,tab))
+    record,maps=_ii2d_isolate_core(owner,tab,roi,int(frame),record,maps,scale)
+    record.update(frame=int(frame),roi_index=1 if tab==10 else int(roi)+1,
+        field_mT=_tab10_intensity_field(owner,int(frame)),analysis_method='Direct 2D pixels; no line/Gaussian fitting')
+    record.update(_intensity_provenance(owner,int(frame)))
+    paths=getattr(owner,'reconstruction_paths',None) or []
+    if int(frame)<len(paths):
+        record['source_file']=str(paths[int(frame)])
+        try:record['source_acquisition_frame_index']=int(Path(paths[int(frame)]).parent.name.rsplit('_',1)[-1])
+        except ValueError:record['source_acquisition_frame_index']=int(frame)
+    cache[key]=(dict(record),maps)
+    while len(cache)>2:cache.pop(next(iter(cache)))
+    _ii2d_store_display(owner,tab,frame,roi,record,maps)
+    return record,maps
+
+
+def _ii2d_dataframe(owner, tab):
+    records=getattr(owner,f'_tab{tab}_2d_results',{})
+    signature=getattr(owner,f'_tab{tab}_2d_signature',None)
+    if records and signature is not None:
+        try:current=_ii2d_signature(owner,tab)
+        except (ValueError,TypeError):current=None
+        if signature!=current:records.clear()
+    return pd.DataFrame(list(records.values())).sort_values(['roi_index','frame']) if records else pd.DataFrame()
+
+
+def _ii2d_signature(owner, tab):
+    primary,rois,scale=_ii2d_source(owner,tab)
+    source=getattr(owner,'_tab9_last_source_signature_v22' if tab==10 else '_tab11_primary_source_signature_v22',None)
+    return (repr(source),tuple(primary.shape),tuple(scale),tuple(tuple(r[k] for k in ('xmin','xmax','ymin','ymax')) for r in rois),
+            _intensity_mode(owner),_tab4_component_confirmed(owner),tuple(sorted(_ii2d_options(owner,tab).items())),
+            bool(getattr(owner,f'tab{tab}_zero_if_undetected_var').get()),
+            tuple(sorted(_ii2d_detection_options(owner,tab).items())))
+
+
+def _ii2d_export_table(source):
+    if source is None or source.empty:return pd.DataFrame()
+    table=source.copy()
+    table.insert(0,'Frame',table['frame'].astype(int)+1)
+    table.rename(columns={'frame':'Frame_Index','roi_index':'ROI','field_mT':'Field_mT',
+        'ii2d_integrated':'II_2D_au_nm2','ii2d_positive_contrast_integral':'Positive_Contrast_Integral_au_nm2',
+        'ii2d_rms_diameter_nm':'Intensity_Weighted_RMS_Diameter_nm',
+        'ii2d_feature_area_nm2':'Feature_Area_nm2','ii2d_equivalent_diameter_nm':'Equivalent_Diameter_nm',
+        'ii2d_centroid_x_nm':'Centroid_X_nm','ii2d_centroid_y_nm':'Centroid_Y_nm',
+        'ii2d_major_rms_width_nm':'Major_Axis_RMS_Width_nm','ii2d_minor_rms_width_nm':'Minor_Axis_RMS_Width_nm'},inplace=True)
+    table.rename(columns={'ii2d_outer_circularity':'Outer_Circularity',
+        'ii2d_minimum_outer_circularity':'Minimum_Outer_Circularity',
+        'ii2d_outer_area_nm2':'Outer_Area_nm2','ii2d_outer_perimeter_nm':'Outer_Perimeter_nm'},inplace=True)
+    return table
+
+
+_II2D_SIZE_AXES = {'Intensity-weighted RMS diameter (nm)':'ii2d_rms_diameter_nm',
+    'Equivalent diameter (nm)':'ii2d_equivalent_diameter_nm',
+    'Major RMS width (nm)':'ii2d_major_rms_width_nm','Minor RMS width (nm)':'ii2d_minor_rms_width_nm'}
+_II2D_SIGNAL_AXES = {'2D-I.I. (a.u. nm²)':'ii2d_integrated',
+    'Positive contrast integral (a.u. nm²)':'ii2d_positive_contrast_integral'}
+
+
+def _ii2d_update_table(owner, tab):
+    _result_tree_fill(getattr(owner,f'tab{tab}_ii_table'),_ii2d_export_table(_ii2d_dataframe(owner,tab)))
+    if tab==10:
+        for title,tree in owner._tab10_detail_trees.items():
+            if title!='Frame Results':_result_tree_fill(tree,pd.DataFrame())
+
+
+def _ii2d_series(owner, tab, ax, right, data, top=None):
+    ax.clear();right.clear()
+    if top is not None:top.clear()
+    size=getattr(owner,f'tab{tab}_ii_y1_var').get()
+    signal=getattr(owner,f'tab{tab}_ii_y2_var').get()
+    size_key=_II2D_SIZE_AXES.get(size,'ii2d_rms_diameter_nm')
+    signal_key=_II2D_SIGNAL_AXES.get(signal,'ii2d_integrated')
+    if size not in _II2D_SIZE_AXES:size='Intensity-weighted RMS diameter (nm)'
+    if signal not in _II2D_SIGNAL_AXES:signal='2D-I.I. (a.u. nm²)'
+    ax.set_xlabel('Frame index (0-based)');ax.set_ylabel('RMS diameter (nm)' if size=='Intensity-weighted RMS diameter (nm)' else size)
+    unit='normalized a.u.' if not _intensity_raw(owner) else 'a.u.'
+    right.set_ylabel(f'{"2D-I.I." if signal.startswith("2D-I.I.") else signal} ({unit}·nm²)',color='tab:blue')
+    right.tick_params(axis='y',colors='tab:blue')
+    right.yaxis.set_label_position('right');right.yaxis.tick_right()
+    right.yaxis.set_offset_position('right')
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.ticklabel_format(axis='y',style='plain',useOffset=False)
+    right.ticklabel_format(axis='y',style='sci',scilimits=(-3,4),useOffset=False)
+    ax.set_title('Direct 2D ROI measurements | local background subtracted',pad=38 if top is not None else 10)
+    ax.grid(alpha=.2)
+    if data is not None and not data.empty:
+        for i,(rid,group) in enumerate(data.groupby('roi_index',sort=True)):
+            group=group.sort_values('frame')
+            x=group['frame'].to_numpy(float)
+            ax.plot(x,group[size_key],'^-',color='tab:red',label=f'ROI {int(rid)}: {size}',ms=4)
+            right.plot(x,group[signal_key],'o--',color='tab:blue',label=f'ROI {int(rid)}: {signal}',ms=4)
+        sizes=pd.to_numeric(data[size_key],errors='coerce').to_numpy(float)
+        sizes=sizes[np.isfinite(sizes)]
+        if sizes.size and np.ptp(sizes)<1e-6*max(1.,float(np.max(np.abs(sizes)))):
+            center=float(np.mean(sizes));pad=max(1.,.05*abs(center))
+            ax.set_ylim(center-pad,center+pad)
+        if top is not None:
+            frames=sorted(set(data['frame'].astype(int)))
+            take=np.linspace(0,len(frames)-1,min(8,len(frames)),dtype=int)
+            ticks=np.asarray(frames)[take]
+            top.set_xticks(ticks)
+            top.set_xticklabels([f'{_tab10_intensity_field(owner,int(frame)):+.4g}' for frame in ticks])
+    elif top is not None:top.set_xticks([])
+    if top is not None:
+        top.set_xlabel('Field (mT)');top.set_xlim(ax.get_xlim())
+    handles,labels=ax.get_legend_handles_labels();rh,rl=right.get_legend_handles_labels()
+    if handles or rh:ax.legend(handles+rh,labels+rl,fontsize=7,loc='best')
+
+
+def _ii2d_plot(owner, tab):
+    """Use the existing Figure 5/6 axes and menus for both measurement types."""
+    if not hasattr(owner,f'tab{tab}_ax_intensity'):return
+    left=getattr(owner,f'tab{tab}_ax_intensity')
+    right=getattr(owner,f'_tab{tab}_ii_y2_ax')
+    top=getattr(owner,f'_tab{tab}_ii_field_ax')
+    for axis in (left,right,top):axis.clear()
+    size=getattr(owner,f'tab{tab}_ii_y1_var').get()
+    signal=getattr(owner,f'tab{tab}_ii_y2_var').get()
+    one=getattr(owner,f'_tab{tab}_tracking_df',None) if tab==10 else _tab11_intensity_dataframe(owner)
+    if not isinstance(one,pd.DataFrame):one=pd.DataFrame()
+    two=_ii2d_dataframe(owner,tab)
+    size_key=_II2D_SIZE_AXES.get(size,{'Gaussian FWHM (nm)':'fwhm','D-fit Diameter (nm)':'diameter_nm'}.get(size))
+    signal_key=_II2D_SIGNAL_AXES.get(signal,{'I.I. Avg. Line Fit':'ii_avg_line_fit','I.I. Gaussian Fit':'ii_gaussian_fit'}.get(signal))
+    unit='a.u.' if _intensity_raw(owner) else 'normalized a.u.'
+    signal_label=(('2D-I.I.' if signal_key=='ii2d_integrated' else 'Positive contrast integral')+f' ({unit}·nm²)'
+        if signal in _II2D_SIGNAL_AXES else signal.replace('I.I.','1D-I.I.')+f' ({unit}·nm)')
+    left.set_xlabel('Frame index (0-based)');left.set_ylabel(size,color='tab:red')
+    left.tick_params(axis='y',colors='tab:red')
+    right.set_ylabel(signal_label,color='tab:blue');right.tick_params(axis='y',colors='tab:blue')
+    right.yaxis.set_label_position('right');right.yaxis.tick_right();right.yaxis.set_offset_position('right')
+    left.set_title(f'Figure {5 if tab==10 else 6}: Size and Integrated Intensity',pad=42)
+    left.grid(alpha=.2)
+    from matplotlib.ticker import MaxNLocator
+    left.xaxis.set_major_locator(MaxNLocator(integer=True))
+    all_frames=[];notes=[]
+    for axis,key,label,data,color,marker in (
+        (left,size_key,size,two if size in _II2D_SIZE_AXES else one,'tab:red','^-'),
+        (right,signal_key,signal,two if signal in _II2D_SIGNAL_AXES else one,'tab:blue','o--')):
+        if key is None or data.empty or key not in data:
+            notes.append(label+': no calculated values');continue
+        data=data.copy()
+        if 'roi_index' not in data or tab==10:data['roi_index']=1
+        for roi,group in data.groupby('roi_index',sort=True):
+            group=group.sort_values('frame',kind='stable')
+            frames=pd.to_numeric(group['frame'],errors='coerce').to_numpy(float)
+            values=pd.to_numeric(group[key],errors='coerce').to_numpy(float)
+            all_frames.extend(frames[np.isfinite(frames)])
+            name=(f'ROI {int(roi)}: ' if tab==11 else '')+label
+            sd={'fwhm':'fwhm_err','diameter_nm':'diameter_err_nm'}.get(key,key+'_sd')
+            if sd in group:
+                _ii_errorbar(axis,frames,values,pd.to_numeric(group[sd],errors='coerce').to_numpy(float),
+                    fmt=marker,color=color,markersize=4,linewidth=1.3,label=name)
+            else:axis.plot(frames,values,marker,color=color,ms=4,label=name)
+    top.set_xlabel('Field (mT)');top.xaxis.set_label_position('top');top.xaxis.tick_top()
+    frames=np.unique(np.asarray(all_frames,float))
+    if frames.size:
+        margin=max(.5,float(np.ptp(frames))*.03)
+        left.set_xlim(frames.min()-margin,frames.max()+margin)
+        ticks=frames[np.linspace(0,len(frames)-1,min(8,len(frames)),dtype=int)]
+        fields=[_tab10_intensity_field(owner,int(frame)) for frame in ticks]
+        top.set_xticks(ticks);top.set_xticklabels([f'{value:+.4g}' if np.isfinite(value) else '--' for value in fields])
+    else:top.set_xticks([])
+    top.set_xlim(left.get_xlim())
+    left.callbacks.connect('xlim_changed',lambda axis:top.set_xlim(axis.get_xlim()))
+    handles,labels=left.get_legend_handles_labels();other,names=right.get_legend_handles_labels()
+    if handles or other:left.legend(handles+other,labels+names,loc='best',fontsize=8)
+    if notes:left.text(.5,.02,'\n'.join(notes),transform=left.transAxes,ha='center',va='bottom',fontsize=8,color='dimgray')
+    getattr(owner,f'tab{tab}_ii_fig').subplots_adjust(left=.12,right=.86,bottom=.13,top=.79)
+    getattr(owner,f'tab{tab}_ii_canvas').draw_idle()
+
+
+def _ii2d_axis_requested(owner, tab):
+    return (getattr(owner,f'tab{tab}_ii_y1_var').get() in _II2D_SIZE_AXES or
+            getattr(owner,f'tab{tab}_ii_y2_var').get() in _II2D_SIGNAL_AXES)
+
+
+def _ii2d_axes_changed(owner, tab):
+    if getattr(owner,f'_tab{tab}_2d_switching',False):return
+    if _ii2d_enabled(owner,tab):_ii2d_render_safe(owner,tab)
+    if _ii2d_enabled(owner,tab) or _ii2d_axis_requested(owner,tab):_ii2d_plot(owner,tab)
+
+
+def _ii2d_prepare_line_axis(axis):
+    """An imshow aspect survives clear(); restore line-plot geometry explicitly."""
+    axis.set_aspect('auto')
+    axis.set_box_aspect(None)
+    axis.set_adjustable('datalim')
+    axis.set_autoscalex_on(True);axis.set_autoscaley_on(True)
+    axis.margins(x=.05,y=.05)
+    axis._intensity_exempt=False
+
+
+def _ii2d_restore_1d_axes(owner, tab):
+    _ii2d_clear_twins(owner,tab)
+    bar=getattr(owner,f'_tab{tab}_2d_cbar',None)
+    if bar is not None:
+        try:bar.remove()
+        except (AttributeError,ValueError,KeyError):pass
+        setattr(owner,f'_tab{tab}_2d_cbar',None)
+    axes=[getattr(owner,f'tab{tab}_ax_fit')]
+    if tab==10:axes.append(owner.tab10_ax_profiles)
+    for axis in axes:
+        axis.clear();_ii2d_prepare_line_axis(axis)
+
+
+def _ii2d_clear_twins(owner, tab):
+    names=(('_tab10_fit_residual_ax','_tab10_ax_tracking2','_tab10_tracking_secx') if tab==10 else
+        ('_tab11_fit_residual_ax','_tab11_current_amp_ax','_tab11_current_frame_ax','_tab11_all_amp_ax','_tab11_all_frame_ax'))
+    for name in names:
+        axis=getattr(owner,name,None)
+        if axis is not None:
+            try:axis.remove()
+            except (ValueError,KeyError):pass
+            setattr(owner,name,None)
+
+
+def _ii2d_sync_frame_labels(owner, tab, frame=None, count=None):
+    if count is None:
+        stack=getattr(owner,'_tab10_roi4_stack' if tab==10 else '_tab11_primary_stack',None)
+        count=len(stack) if stack is not None else 0
+    if count<=0:return None
+    variable=getattr(owner,f'tab{tab}_frame_var')
+    frame=max(0,min(int(variable.get()) if frame is None else int(frame),count-1))
+    if int(variable.get())!=frame:
+        previous=getattr(owner,f'_tab{tab}_programmatic',False)
+        setattr(owner,f'_tab{tab}_programmatic',True)
+        try:variable.set(frame)
+        finally:setattr(owner,f'_tab{tab}_programmatic',previous)
+    field=_tab10_intensity_field(owner,frame)
+    field_text=f'{field:+.6g} mT' if np.isfinite(field) else '— mT'
+    text=f'Frame No. {frame+1}/{count} | Equivalent Field: {field_text}'
+    for name in (f'tab{tab}_frame_label_var',f'tab{tab}_frame_info_var'):
+        label=getattr(owner,name,None)
+        if label is not None:label.set(text)
+    return frame
+
+
+def _ii2d_set_measurement_status(owner, tab, frame, record):
+    unit='a.u.' if _intensity_raw(owner) else 'normalized a.u.'
+    if record.get('calculated',True) is False:
+        text='Frame not calculated; use MEASURE CURRENT ROI or TRACK-SELECTED FRAMES.'
+        center_text=f'Frame {frame+1}: not calculated.'
+    elif record.get('core_detected',False):
+        text=(f'{_intensity_mode(owner)} full-ROI 2D I.I. = {record["ii2d_integrated"]:.6g} {unit}·nm² | '
+              f'core RMS diameter = {record["ii2d_rms_diameter_nm"]:.6g} nm | {record["ii2d_status"]}')
+        center_text=(f'Frame {frame+1}: 2D core detected | X={record["ii2d_centroid_x_nm"]:.4g} nm, '
+                     f'Y={record["ii2d_centroid_y_nm"]:.4g} nm.')
+    else:
+        text=(f'No core detected; tracked 2D I.I. = 0 {unit}·nm²; size unavailable.'
+            if bool(getattr(owner,f'tab{tab}_zero_if_undetected_var').get()) else
+            'No core detected; frame omitted from 2D tracking. Full-ROI integral is not plotted.')
+        center_text=f'Frame {frame+1}: no qualifying 2D core detected.'
+    getattr(owner,f'tab{tab}_ii_status_var').set(text)
+    getattr(owner,f'tab{tab}_fit_status_var').set(text)
+    center_label=getattr(owner,f'tab{tab}_center_follow_status_var',None)
+    if center_label is not None:center_label.set(center_text)
+
+
+def _ii2d_refresh_preview_tracking(owner, tab):
+    data=_ii2d_dataframe(owner,tab)
+    if tab==10:
+        right=getattr(owner,'_tab10_ax_tracking2',None)
+        if right is not None:_ii2d_series(owner,10,owner.tab10_ax_tracking,right,data)
+    else:
+        roi=_tab11_selected_roi_index(owner)
+        for axis,name,subset in [(owner.tab11_ax_current_tracking,'_tab11_current_amp_ax',data[data.roi_index==roi+1] if not data.empty else data),
+                                 (owner.tab11_ax_all_tracking,'_tab11_all_amp_ax',data)]:
+            right=getattr(owner,name,None)
+            if right is not None:_ii2d_series(owner,11,axis,right,subset)
+
+
+def _ii2d_update_preview_artists(owner, tab, frame, primary, rois, scale, roi, record, maps):
+    state=getattr(owner,f'_tab{tab}_2d_render_state',None)
+    key=(id(primary),_ii2d_signature(owner,tab),int(roi))
+    if state is None or state['key']!=key:return False
+    if any(artist.axes is None or artist not in artist.axes.images for artist in state['images']):return False
+    lo,hi=_intensity_limits(owner,frame,True)
+    state['main_image'].set_data(maps['crop']);state['main_image'].set_clim(lo,hi)
+    if tab==10:
+        state['mask_image'].set_data(maps['feature'])
+        state['main'].set_title(f'2D selected ROI | Frame {frame+1}/{len(primary)} | Field {_tab10_intensity_field(owner,frame):+.4g} mT')
+        state['mask_image'].axes.set_title('Frame not calculated' if record.get('calculated',True) is False else
+            (f'Interior core | area threshold {record["ii2d_area_threshold_fraction"]:.0%}' if record['core_detected'] else 'No core detected — edge particles/noise ignored'))
+    else:
+        state['primary_image'].set_data(primary[frame]);state['primary_image'].set_clim(lo,hi)
+        state['primary_image'].axes.set_title(f'Processed primary ROI | Frame {frame+1}/{len(primary)} | Field {_tab10_intensity_field(owner,frame):+.4g} mT')
+    residual=maps['contrast'];span=max(float(np.max(np.abs(residual[maps['valid']]))),np.finfo(float).eps)
+    state['contrast_image'].set_data(np.ma.array(residual,mask=~maps['core_support']))
+    state['contrast_image'].set_clim(-span,span)
+    state['contrast_image'].axes.set_title('Frame not calculated' if record.get('calculated',True) is False else
+        ('Retained core: background-subtracted intensity' if record['core_detected'] else 'No retained core — measurement unavailable'))
+    old=state.get('contour')
+    if old is not None:
+        if hasattr(old,'remove'):old.remove()
+        else:
+            for collection in old.collections:collection.remove()
+    state['contour']=None
+    bounds=rois[roi];sx,sy=scale;h,w=maps['crop'].shape
+    if maps['feature'].any() and not maps['feature'].all():
+        state['contour']=state['main'].contour((np.arange(w)+bounds['xmin']+.5)*sx,
+            (np.arange(h)+bounds['ymin']+.5)*sy,maps['feature'].astype(float),levels=[.5],colors=['lime'],linewidths=1.)
+    state['centroid'].set_data([record['ii2d_centroid_x_nm']],[record['ii2d_centroid_y_nm']])
+    _ii2d_set_measurement_status(owner,tab,frame,record)
+    getattr(owner,f'tab{tab}_canvas').draw_idle()
+    return True
+
+
+def _ii2d_render(owner, tab, frame=None, reuse=False, data=None):
+    primary,rois,scale=_ii2d_source(owner,tab)
+    frame=_ii2d_sync_frame_labels(owner,tab,frame,len(primary))
+    roi=0 if tab==10 else _tab11_selected_roi_index(owner)
+    if data is None:data=_ii2d_display_data(owner,tab,frame,roi)
+    record,maps=data if data is not None else _ii2d_compute(owner,tab,frame,roi)
+    if reuse and _ii2d_update_preview_artists(owner,tab,frame,primary,rois,scale,roi,record,maps):
+        return record,maps
+    sx,sy=scale;bounds=rois[roi]
+    image=maps['crop'];height,width=image.shape
+    extent=(bounds['xmin']*sx,(bounds['xmax']+1)*sx,bounds['ymin']*sy,(bounds['ymax']+1)*sy)
+    figure=getattr(owner,f'tab{tab}_fig')
+    _ii2d_clear_twins(owner,tab)
+    cmap=owner.colormap_var.get();lo,hi=_intensity_limits(owner,frame,True)
+    if tab==10:
+        axes=[owner.tab10_ax_image,owner.tab10_ax_profiles,owner.tab10_ax_fit]
+        for name in ('_tab10_cbar_image','_tab10_2d_cbar'):
+            bar=getattr(owner,name,None)
+            if bar is not None:
+                try:bar.remove()
+                except (ValueError,KeyError):pass
+                setattr(owner,name,None)
+        for axis in axes:axis.clear()
+        main,mask_axis,contrast_axis=axes
+        im=main.imshow(image,origin='lower',extent=extent,aspect='equal',cmap=cmap,vmin=lo,vmax=hi)
+        owner._tab10_cbar_image=figure.colorbar(im,ax=main,label='Intensity (a.u.)')
+        main.set_title(f'2D selected ROI | Frame {frame+1}/{len(primary)} | Field {_tab10_intensity_field(owner,frame):+.4g} mT')
+        mask_axis._intensity_exempt=True
+        mask_axis.imshow(maps['feature'],origin='lower',extent=extent,aspect='equal',cmap='gray',vmin=0,vmax=1)
+        mask_axis.set_title('Frame not calculated' if record.get('calculated',True) is False else
+            (f'Interior core | area threshold {record["ii2d_area_threshold_fraction"]:.0%}' if record['core_detected'] else 'No core detected — edge particles/noise ignored'))
+    else:
+        main,contrast_axis=owner.tab11_ax_selected,owner.tab11_ax_fit
+        bar=getattr(owner,'_tab11_2d_cbar',None)
+        if bar is not None:
+            # Remove before clearing its parent image; Colorbar.remove needs
+            # the mappable's live axes to restore the subplot geometry.
+            try:bar.remove()
+            except (ValueError,KeyError,AttributeError):pass
+            owner._tab11_2d_cbar=None
+        owner.tab11_ax_primary.clear();main.clear();contrast_axis.clear()
+        full=owner.tab11_ax_primary
+        artist=full.imshow(primary[frame],origin='lower',extent=(0,primary.shape[2]*sx,0,primary.shape[1]*sy),aspect='equal',cmap=cmap,vmin=lo,vmax=hi)
+        _tab11_bind_colorbar(owner,artist)
+        full.set_title(f'Processed primary ROI | Frame {frame+1}/{len(primary)} | Field {_tab10_intensity_field(owner,frame):+.4g} mT')
+        full.set_xlabel('X (nm)');full.set_ylabel('Y (nm)')
+        for rid,other in enumerate(rois):
+            full.add_patch(plt.Rectangle((other['xmin']*sx,other['ymin']*sy),
+                (other['xmax']-other['xmin']+1)*sx,(other['ymax']-other['ymin']+1)*sy,
+                fill=False,color='red' if rid==roi else 'lime',lw=1.6))
+            full.text(other['xmin']*sx,other['ymax']*sy,f'ROI {rid+1}',color='red' if rid==roi else 'lime')
+        main.imshow(image,origin='lower',extent=extent,aspect='equal',cmap=cmap,vmin=lo,vmax=hi)
+        main.set_title(f'ROI {roi+1}: direct 2D intensity and size')
+    contrast_axis._intensity_exempt=True
+    residual=maps['contrast'];span=max(float(np.max(np.abs(residual[maps['valid']]))),np.finfo(float).eps)
+    contrast_image=contrast_axis.imshow(np.ma.array(residual,mask=~maps.get('core_support',maps['valid'])),origin='lower',extent=extent,
+        aspect='equal',cmap='RdBu_r',vmin=-span,vmax=span)
+    setattr(owner,f'_tab{tab}_2d_cbar',figure.colorbar(contrast_image,ax=contrast_axis,label='Intensity (a.u.)'))
+    contrast_axis.set_title('Frame not calculated' if record.get('calculated',True) is False else
+        ('Retained core: background-subtracted intensity' if record['core_detected'] else 'No retained core — measurement unavailable'))
+    contour=None
+    if maps['feature'].any() and not maps['feature'].all():
+        contour=main.contour((np.arange(width)+bounds['xmin']+.5)*sx,(np.arange(height)+bounds['ymin']+.5)*sy,
+            maps['feature'].astype(float),levels=[.5],colors=['lime'],linewidths=1.)
+    centroid,=main.plot(record['ii2d_centroid_x_nm'],record['ii2d_centroid_y_nm'],'w+',ms=12,mew=2,label='Intensity-weighted centroid')
+    for axis in (main,contrast_axis):axis.set_xlabel('X (nm)');axis.set_ylabel('Y (nm)')
+    if tab==10:
+        mask_axis.set_xlabel('X (nm)');mask_axis.set_ylabel('Y (nm)')
+        tracking=owner.tab10_ax_tracking;right=tracking.twinx();owner._tab10_ax_tracking2=right
+        _ii2d_series(owner,10,tracking,right,_ii2d_dataframe(owner,10))
+    else:
+        data=_ii2d_dataframe(owner,11)
+        for axis,name,subset in [(owner.tab11_ax_current_tracking,'_tab11_current_amp_ax',data[data.roi_index==roi+1] if not data.empty else data),
+                                 (owner.tab11_ax_all_tracking,'_tab11_all_amp_ax',data)]:
+            right=axis.twinx();setattr(owner,name,right)
+            _ii2d_series(owner,11,axis,right,subset)
+    state=dict(key=(id(primary),_ii2d_signature(owner,tab),int(roi)),main=main,
+        main_image=main.images[0],contrast_image=contrast_image,contour=contour,centroid=centroid)
+    if tab==10:state['mask_image']=mask_axis.images[0]
+    else:state['primary_image']=full.images[0]
+    state['images']=[state['main_image'],contrast_image,state['mask_image'] if tab==10 else state['primary_image']]
+    setattr(owner,f'_tab{tab}_2d_render_state',state)
+    _ii2d_set_measurement_status(owner,tab,frame,record)
+    getattr(owner,f'tab{tab}_canvas').draw_idle()
+    return record,maps
+
+
+def _ii2d_run(owner, tab, tracking=False):
+    if getattr(owner,f'_tab{tab}_2d_busy',False):return
+    if getattr(owner,f'_tab{tab}_2d_slider_dragging',False):return
+    _ii2d_cancel_frame_job(owner,tab)
+    job=getattr(owner,f'_tab{tab}_2d_job',None)
+    if job is not None:
+        owner.root.after_cancel(job);setattr(owner,f'_tab{tab}_2d_job',None)
+    setattr(owner,f'_tab{tab}_2d_busy',True)
+    setattr(owner,f'_tab{tab}_stop_requested',False)
+    try:
+        if tab==10 and getattr(owner,'_tab10_roi4_stack',None) is None:
+            if not _tab10_sync_roi4_from_tab9(owner,preserve_frame=True):return
+        elif tab==11 and not getattr(owner,'_tab11_primary_ready',False):
+            if not _tab11_fetch_primary(owner,preserve_frame=True):return
+        primary,rois,scale=_ii2d_source(owner,tab)
+        signature=_ii2d_signature(owner,tab)
+        if getattr(owner,f'_tab{tab}_2d_signature',None)!=signature:_ii2d_clear(owner,tab)
+        setattr(owner,f'_tab{tab}_2d_signature',signature)
+        frame=_ii2d_sync_frame_labels(owner,tab,count=len(primary))
+        if tracking:
+            start,end=sorted((int(getattr(owner,f'tab{tab}_start_var').get()),int(getattr(owner,f'tab{tab}_end_var').get())))
+            frames=range(max(0,start),min(len(primary)-1,end)+1)
+            selected=range(len(rois))
+            setattr(owner,f'_tab{tab}_2d_results',{})
+        else:
+            frames=[max(0,min(frame,len(primary)-1))]
+            selected=[0 if tab==10 else _tab11_selected_roi_index(owner)]
+        cache=getattr(owner,f'_tab{tab}_2d_results')
+        total=len(frames)*len(selected);done=0
+        snapshot=_ii2d_signature(owner,tab)
+        _analysis_progress_update(owner,tab,0,total)
+        for index in frames:
+            for roi in selected:
+                if getattr(owner,f'_tab{tab}_stop_requested',False):break
+                record,_=_ii2d_compute(owner,tab,index,roi)
+                key=(int(record['roi_index']),int(index))
+                if not record.get('core_detected',False):
+                    if not bool(getattr(owner,f'tab{tab}_zero_if_undetected_var').get()):
+                        cache.pop(key,None)
+                        done+=1;_analysis_progress_update(owner,tab,done,total)
+                        continue
+                    record.update(ii2d_integrated=0.,ii2d_positive_contrast_integral=0.,
+                        ii2d_feature_area_nm2=0.,ii2d_equivalent_diameter_nm=0.,
+                        ii2d_core_pixels=0,ii2d_status='no core detected; zero used')
+                cache[key]=record
+                done+=1;_analysis_progress_update(owner,tab,done,total)
+            if done%5==0 or done==total:
+                _ii2d_update_table(owner,tab);_ii2d_plot(owner,tab)
+                if tracking:owner.root.update()
+                if not _ii2d_enabled(owner,tab):return
+                if snapshot!=_ii2d_signature(owner,tab):
+                    cache.clear();raise ValueError('ROI, source or intensity settings changed during 2D measurement; run it again.')
+            if getattr(owner,f'_tab{tab}_stop_requested',False):break
+        _ii2d_update_table(owner,tab);_ii2d_plot(owner,tab)
+        if not getattr(owner,f'_tab{tab}_2d_slider_dragging',False):
+            current=int(getattr(owner,f'tab{tab}_frame_var').get())
+            roi=0 if tab==10 else _tab11_selected_roi_index(owner)
+            display=_ii2d_display_data(owner,tab,current,roi)
+            if display is None:display=_ii2d_uncalculated_preview(owner,tab,current,roi)
+            _ii2d_render(owner,tab,current,data=display)
+        return _ii2d_dataframe(owner,tab)
+    except Exception as exc:
+        getattr(owner,f'tab{tab}_fit_status_var').set('2D measurement unavailable: '+str(exc))
+        _export_error_dialog(messagebox.showerror,f'Tab {tab} direct 2D measurement',str(exc),parent=owner.root)
+    finally:setattr(owner,f'_tab{tab}_2d_busy',False)
+
+
+def _ii2d_render_safe(owner, tab, frame=None):
+    try:return _ii2d_render(owner,tab,frame)
+    except (ValueError,IndexError,TypeError) as exc:
+        getattr(owner,f'tab{tab}_ii_status_var').set('2D measurement: '+str(exc))
+
+
+def _ii2d_cancel_frame_job(owner, tab):
+    job=getattr(owner,f'_tab{tab}_2d_frame_job',None)
+    if job is not None:
+        try:owner.root.after_cancel(job)
+        except tk.TclError:pass
+    setattr(owner,f'_tab{tab}_2d_frame_job',None)
+
+
+def _ii2d_slider_pressed(owner, tab, event=None):
+    if not _ii2d_enabled(owner,tab):return
+    setattr(owner,f'_tab{tab}_2d_slider_dragging',True)
+    _ii2d_cancel_frame_job(owner,tab)
+    job=getattr(owner,f'_tab{tab}_2d_job',None)
+    if job is not None:
+        owner.root.after_cancel(job);setattr(owner,f'_tab{tab}_2d_job',None)
+
+
+def _ii2d_slider_released(owner, tab, event=None):
+    setattr(owner,f'_tab{tab}_2d_slider_dragging',False)
+    if _ii2d_enabled(owner,tab):_ii2d_frame_changed(owner,tab,immediate=True)
+
+
+def _ii2d_frame_changed(owner, tab, value=None, immediate=False):
+    if getattr(owner,f'_tab{tab}_programmatic',False):return
+    frame=int(round(float(value))) if value is not None else None
+    frame=_ii2d_sync_frame_labels(owner,tab,frame)
+    if frame is None:return
+    _ii2d_cancel_frame_job(owner,tab)
+    # Frame navigation must never start a new measurement, including one
+    # left queued by a prior settings change.
+    job=getattr(owner,f'_tab{tab}_2d_job',None)
+    if job is not None:
+        owner.root.after_cancel(job);setattr(owner,f'_tab{tab}_2d_job',None)
+    dragging=bool(getattr(owner,f'_tab{tab}_2d_slider_dragging',False))
+    pending=(f'Frame {frame+1} selected; release the slider to display stored results.' if dragging else
+        f'Frame {frame+1} selected; loading stored results...')
+    getattr(owner,f'tab{tab}_ii_status_var').set(pending)
+    getattr(owner,f'tab{tab}_fit_status_var').set(pending)
+    center=getattr(owner,f'tab{tab}_center_follow_status_var',None)
+    if center is not None:center.set(f'Frame {frame+1} selected.')
+    if dragging:return
+    def show():
+        setattr(owner,f'_tab{tab}_2d_frame_job',None)
+        if not _ii2d_enabled(owner,tab) or getattr(owner,f'_tab{tab}_2d_slider_dragging',False):return
+        if getattr(owner,f'_tab{tab}_2d_busy',False):
+            setattr(owner,f'_tab{tab}_2d_frame_job',owner.root.after(100,show));return
+        current=_ii2d_sync_frame_labels(owner,tab)
+        roi=0 if tab==10 else _tab11_selected_roi_index(owner)
+        try:
+            data=_ii2d_display_data(owner,tab,current,roi)
+            if data is None:data=_ii2d_uncalculated_preview(owner,tab,current,roi)
+            _ii2d_render(owner,tab,current,reuse=True,data=data)
+        except (ValueError,IndexError,TypeError) as exc:
+            getattr(owner,f'tab{tab}_ii_status_var').set('2D preview unavailable: '+str(exc))
+    setattr(owner,f'_tab{tab}_2d_frame_job',owner.root.after(0 if immediate else 120,show))
+
+
+def _ii2d_clear(owner, tab):
+    _ii2d_cancel_frame_job(owner,tab)
+    for suffix in ('measurement_cache','display_cache'):
+        cache=getattr(owner,f'_tab{tab}_2d_{suffix}',None)
+        if cache is not None:cache.clear()
+    setattr(owner,f'_tab{tab}_2d_render_state',None)
+    setattr(owner,f'_tab{tab}_2d_display_signature',None)
+    cache=getattr(owner,f'_tab{tab}_2d_results',None)
+    if cache is not None:cache.clear()
+    setattr(owner,f'_tab{tab}_2d_signature',None)
+
+
+def _ii2d_sync(owner, tab):
+    _ii2d_update_table(owner,tab)
+
+
+def _ii2d_settings_changed(owner, tab):
+    if not _ii2d_enabled(owner,tab):return
+    _ii2d_clear(owner,tab);_ii2d_update_table(owner,tab);_ii2d_plot(owner,tab)
+    if getattr(owner,'_tab1_factory_resetting',False):return
+    job=getattr(owner,f'_tab{tab}_2d_job',None)
+    if job is not None:owner.root.after_cancel(job)
+    def run():
+        setattr(owner,f'_tab{tab}_2d_job',None)
+        if _ii2d_enabled(owner,tab) and not getattr(owner,f'_tab{tab}_2d_busy',False):
+            try:_ii2d_source(owner,tab)
+            except ValueError:return
+            _ii2d_run(owner,tab)
+    setattr(owner,f'_tab{tab}_2d_job',owner.root.after(250,run))
+
+
+def _ii2d_toggled(owner, tab):
+    enabled=_ii2d_enabled(owner,tab)
+    _ii2d_cancel_frame_job(owner,tab)
+    setattr(owner,f'_tab{tab}_2d_slider_dragging',False)
+    setattr(owner,f'_tab{tab}_2d_render_state',None)
+    # This is a separate measurement mode: never run Gaussian/line analysis
+    # merely to populate a 2D integral, table or export.
+    for button,text in getattr(owner,f'_tab{tab}_2d_button_labels',{}).items():
+        button.configure(text='MEASURE CURRENT ROI (2D)' if enabled else text)
+    setattr(owner,f'_tab{tab}_2d_switching',True)
+    try:
+        if enabled:
+            setattr(owner,f'_tab{tab}_1d_axis_selection',{
+                which:getattr(owner,f'tab{tab}_ii_{which}_var').get() for which in ('y1','y2')})
+            setattr(owner,f'_tab{tab}_1d_intensity_selected',bool(getattr(owner,f'tab{tab}_integrated_intensity_var').get()))
+            getattr(owner,f'tab{tab}_integrated_intensity_var').set(False)
+        else:
+            one=getattr(owner,f'tab{tab}_integrated_intensity_var')
+            one.set(bool(one.get() or getattr(owner,f'_tab{tab}_1d_intensity_selected',False)))
+        for which,mapping in (('y1',_II2D_SIZE_AXES),('y2',_II2D_SIGNAL_AXES)):
+            variable=getattr(owner,f'tab{tab}_ii_{which}_var')
+            old=getattr(owner,f'_tab{tab}_2d_original_axes')[which]
+            # Keep the same combined menu in both modes; only select a
+            # suitable starting metric, never create a second axis panel.
+            if enabled:
+                if variable.get() not in mapping:variable.set(next(iter(mapping)))
+            else:
+                previous=getattr(owner,f'_tab{tab}_1d_axis_selection',{}).get(which,old[1])
+                variable.set(previous)
+    finally:setattr(owner,f'_tab{tab}_2d_switching',False)
+    states=getattr(owner,f'_tab{tab}_2d_legacy_states',{})
+    was_enabled=bool(getattr(owner,f'_tab{tab}_2d_was_enabled',False))
+    if enabled and not was_enabled:
+        for widget in states:states[widget]=widget.cget('state')
+    for widget,state in states.items():
+        widget.configure(state='disabled' if enabled else state)
+    setattr(owner,f'_tab{tab}_2d_was_enabled',enabled)
+    for axis in getattr(owner,f'tab{tab}_fig').axes:
+        axis._intensity_exempt=False
+    for name in (f'_tab{tab}_2d_cbar',):
+        bar=getattr(owner,name,None)
+        if bar is not None:
+            try:bar.remove()
+            except (AttributeError,ValueError,KeyError):pass
+            setattr(owner,name,None)
+    if getattr(owner,'_tab1_factory_resetting',False):return
+    setattr(owner,f'_tab{tab}_stop_requested',True)
+    for suffix in ('ii_recalculate_job','2d_job'):
+        job=getattr(owner,f'_tab{tab}_{suffix}',None)
+        if job is not None:owner.root.after_cancel(job)
+        setattr(owner,f'_tab{tab}_{suffix}',None)
+    if enabled:
+        for variable in getattr(owner,f'tab{tab}_param_vars',{}).values():variable.set('—')
+    for axis in (getattr(owner,f'tab{tab}_ax_fit'),):axis.clear()
+    if enabled:
+        _ii2d_settings_changed(owner,tab)
+        getattr(owner,f'tab{tab}_fit_status_var').set('Direct 2D mode: select/confirm ROI, then MEASURE CURRENT ROI or TRACK frames. '+
+            ('Raw reconstruction units.' if _intensity_raw(owner) else 'Normalized data selected in Tab 4; choose Raw there for original signal units.'))
+    else:
+        _ii2d_restore_1d_axes(owner,tab)
+        result=getattr(owner,f'_tab{tab}_last_fit',None)
+        frame=int(getattr(owner,f'tab{tab}_frame_var').get())
+        if isinstance(result,dict) and (int(result.get('frame',-1))!=frame or
+                (tab==11 and int(result.get('roi_index',-1))!=_tab11_selected_roi_index(owner)+1)):
+            result=None;setattr(owner,f'_tab{tab}_last_fit',None)
+        globals()[f'_tab{tab}_plot_intensity'](owner)
+        data=getattr(owner,'_tab10_tracking_df',None) if tab==10 else _tab11_intensity_dataframe(owner)
+        _ii_refresh_table(owner,tab,data if isinstance(data,pd.DataFrame) else pd.DataFrame())
+        globals()['_tab10_render_current' if tab==10 else '_tab11_render'](owner)
+        if isinstance(result,dict):
+            globals()['_tab10_draw_fit_result' if tab==10 else '_tab11_draw_current_fit_views'](owner,result)
+        elif tab==10:
+            owner.tab10_canvas.draw_idle()
+        if tab==10:
+            _tab10_plot_tracking(owner,data,int(owner.tab10_start_var.get()),int(owner.tab10_end_var.get()),draw_now=False)
+        else:
+            _tab11_plot_tracking_panel(owner,getattr(owner,'_tab11_current_tracking_df',None),
+                owner.tab11_ax_current_tracking,mode='current',title='CURRENT ROI',draw=False)
+            _tab11_plot_tracking_panel(owner,getattr(owner,'_tab11_tracking_df',None),
+                owner.tab11_ax_all_tracking,mode='all',title='ALL SELECTED ROIs',draw=False)
+        getattr(owner,f'tab{tab}_canvas').draw_idle()
+        getattr(owner,f'tab{tab}_fit_status_var').set('1D analysis mode restored.'+
+            (' Previous fit restored.' if isinstance(result,dict) else ' Run FIT CURRENT ROI to calculate a new fit.'))
+
+
+def _ii2d_1d_toggled(owner, tab):
+    if getattr(owner,f'tab{tab}_integrated_intensity_var').get() and _ii2d_enabled(owner,tab):
+        getattr(owner,f'tab{tab}_integrated_intensity_2d_var').set(False)
+
+
+def _install_direct_2d_intensity(owner):
+    for tab in (10,11):
+        old=getattr(owner,f'tab{tab}_integrated_intensity_check')
+        settings=old.master;info=old.grid_info()
+        old.destroy()
+        row=ttk.Frame(settings)
+        row.grid(row=int(info['row']),column=0,columnspan=2 if tab==10 else 4,sticky='ew',pady=4)
+        original=ttk.Checkbutton(row,text='1D-Integrated Intensity',variable=getattr(owner,f'tab{tab}_integrated_intensity_var'),
+            command=lambda t=tab:globals()[f'_tab{t}_intensity_toggled'](owner))
+        original.pack(side='left',padx=(0,8),anchor='w')
+        setattr(owner,f'tab{tab}_integrated_intensity_check',original)
+        variable=tk.BooleanVar(master=owner.root,value=False)
+        setattr(owner,f'tab{tab}_integrated_intensity_2d_var',variable)
+        button=ttk.Checkbutton(row,text='2D-Integrated Intensity',variable=variable)
+        button.pack(side='left')
+        setattr(owner,f'tab{tab}_integrated_intensity_2d_check',button)
+        setattr(owner,f'_tab{tab}_2d_results',{})
+        setattr(owner,f'_tab{tab}_2d_busy',False)
+        setattr(owner,f'_tab{tab}_2d_job',None)
+        setattr(owner,f'_tab{tab}_2d_frame_job',None)
+        setattr(owner,f'_tab{tab}_2d_slider_dragging',False)
+        slider=getattr(owner,f'tab{tab}_slider')
+        slider.bind('<ButtonPress-1>',lambda event,t=tab:_ii2d_slider_pressed(owner,t,event),add='+')
+        slider.bind('<ButtonRelease-1>',lambda event,t=tab:_ii2d_slider_released(owner,t,event),add='+')
+        slider.bind('<KeyRelease>',lambda event,t=tab:_ii2d_slider_released(owner,t,event),add='+')
+        box=ttk.LabelFrame(settings,text='DIRECT 2D MEASUREMENT',padding=4)
+        setattr(owner,f'tab{tab}_2d_controls',box)
+        box.grid(row=max(int(w.grid_info()['row']) for w in settings.grid_slaves())+1,column=0,
+                 columnspan=2 if tab==10 else 4,sticky='ew',pady=4)
+        box.columnconfigure(1,weight=1)
+        choices=[('Background','background','Surrounding plane',('Surrounding plane','Surrounding median','ROI border median')),
+                 ('Contrast polarity','polarity','Auto',('Auto','Bright','Dark'))]
+        for i,(label,suffix,default,values) in enumerate(choices):
+            var=tk.StringVar(master=owner.root,value=default)
+            setattr(owner,f'tab{tab}_2d_{suffix}_var',var)
+            ttk.Label(box,text=label).grid(row=i,column=0,sticky='w')
+            combo=ttk.Combobox(box,textvariable=var,values=values,state='readonly',width=22)
+            combo.grid(row=i,column=1,sticky='ew')
+            var.trace_add('write',lambda *_,t=tab:_ii2d_settings_changed(owner,t))
+        fraction=tk.DoubleVar(master=owner.root,value=.5)
+        setattr(owner,f'tab{tab}_2d_area_fraction_var',fraction)
+        ttk.Label(box,text='Area threshold / peak').grid(row=2,column=0,sticky='w')
+        ttk.Spinbox(box,from_=.01,to=.99,increment=.01,textvariable=fraction,width=8).grid(row=2,column=1,sticky='w')
+        fraction.trace_add('write',lambda *_,t=tab:_ii2d_settings_changed(owner,t))
+        circularity=tk.DoubleVar(master=owner.root,value=.70)
+        setattr(owner,f'tab{tab}_2d_minimum_outer_circularity_var',circularity)
+        ttk.Label(box,text='Minimum Outer Circularity').grid(row=3,column=0,columnspan=2,sticky='w',pady=(6,0))
+        slider=tk.Scale(box,from_=0.,to=1.,resolution=.01,orient='horizontal',
+            variable=circularity,showvalue=True,length=230)
+        slider.grid(row=4,column=0,columnspan=2,sticky='ew')
+        setattr(owner,f'tab{tab}_2d_minimum_outer_circularity_slider',slider)
+        circularity.trace_add('write',lambda *_,t=tab:_ii2d_settings_changed(owner,t))
+        ttk.Label(box,text='Circularity: 0 disables the shape filter; 1 requires a circular outer boundary. RMS uses the accepted core mask. Signed 2D I.I. uses the full ROI.',
+            wraplength=450,justify='left').grid(row=5,column=0,columnspan=2,sticky='w')
+        labels={}
+        root_tab=owner.root.nametowidget(owner.nb.tabs()[tab-1])
+        for widget in _legend_walk(root_tab):
+            if isinstance(widget,ttk.Button) and str(widget.cget('text')).upper()=='FIT CURRENT ROI':
+                labels[widget]=str(widget.cget('text'))
+        setattr(owner,f'_tab{tab}_2d_button_labels',labels)
+        axes={which:(tuple(getattr(owner,f'tab{tab}_ii_{which}_combo').cget('values')),
+                     getattr(owner,f'tab{tab}_ii_{which}_var').get()) for which in ('y1','y2')}
+        setattr(owner,f'_tab{tab}_2d_original_axes',axes)
+        for which,mapping in (('y1',_II2D_SIZE_AXES),('y2',_II2D_SIGNAL_AXES)):
+            combo=getattr(owner,f'tab{tab}_ii_{which}_combo')
+            combo.configure(values=tuple(dict.fromkeys((*axes[which][0],*mapping))))
+        legacy_vars={str(value) for name,value in vars(owner).items()
+                     if name.startswith(f'tab{tab}_') and isinstance(value,tk.Variable) and
+                     any(part in name for part in ('gaussian_var','dfit_var','ref_mode_var','dfit_threshold','dfit_sg_','plot_y1','plot_y2','contrast_fraction_var'))}
+        legacy_states={}
+        for widget in _legend_walk(root_tab):
+            keys=widget.keys()
+            if 'state' in keys and any(key in keys and str(widget.cget(key)) in legacy_vars for key in ('variable','textvariable')):
+                legacy_states[widget]=widget.cget('state')
+        setattr(owner,f'_tab{tab}_2d_legacy_states',legacy_states)
+        setattr(owner,f'_tab{tab}_2d_was_enabled',False)
+        for which in ('y1','y2'):
+            getattr(owner,f'tab{tab}_ii_{which}_var').trace_add('write',lambda *_,t=tab:_ii2d_axes_changed(owner,t))
+        variable.trace_add('write',lambda *_,t=tab:_ii2d_toggled(owner,t))
+        getattr(owner,f'tab{tab}_integrated_intensity_var').trace_add('write',lambda *_,t=tab:_ii2d_1d_toggled(owner,t))
+        getattr(owner,f'tab{tab}_zero_if_undetected_var').trace_add('write',lambda *_,t=tab:_ii2d_settings_changed(owner,t))
+
+
+@_auto_open_export
+def _ii2d_export_tables(owner, tab, path=None, current=False):
+    data=_ii2d_dataframe(owner,tab)
+    if data.empty:
+        messagebox.showwarning(f'Tab {tab} 2D export','Measure the ROI or track frames in 2D mode first.',parent=owner.root);return
+    if current:
+        frame=int(getattr(owner,f'tab{tab}_frame_var').get())
+        data=data[data.frame==frame]
+    else:
+        start,end=sorted((int(getattr(owner,f'tab{tab}_start_var').get()),int(getattr(owner,f'tab{tab}_end_var').get())))
+        data=data[data.frame.between(start,end)]
+    if data.empty:
+        messagebox.showwarning(f'Tab {tab} 2D export','No measured 2D data in the selected frame range.',parent=owner.root);return
+    if path is None:
+        folder=_export_capture_folder(filedialog.askdirectory,parent=owner.root,title=f'Select folder for Tab {tab} direct 2D results')
+        if not folder:return
+        path=os.path.join(folder,f'Tab{tab}_2D_Measurements_Indices{int(data.frame.min()):03d}-{int(data.frame.max()):03d}.csv')
+    table=_ii2d_export_table(data)
+    _export_capture_write(table.to_csv,path,index=False)
+    payload=dict(method='Direct 2D area integration and intensity-weighted moments; no line profiles or Gaussian fitting',
+        integral='signed sum(I-background)*dx*dy over every valid pixel in the full selected ROI',
+        rms_diameter='2*sqrt(weighted variance X + weighted variance Y), positive polarity-aligned contrast above the noise threshold within the accepted interior core mask',
+        undetected_tracking='Undetected frames are omitted unless Zero if undetected is checked; then the tracked 2D integral is zero and size metrics are unavailable',
+        core_detection='Unsmoothed ROI pixels above max(configured fraction of smoothed peak contrast, 5x surrounding-background MAD); one central interior connected component; edge, tiny, oversized and distant components rejected',
+        rms_principal_widths='2*sqrt(eigenvalues of the weighted 2D covariance), not Gaussian FWHM',
+        area='Count of valid ROI pixels >= chosen fraction of peak polarity-aligned contrast times dx*dy',
+        equivalent_diameter='2*sqrt(feature area/pi)',centroid_coordinates='Processed primary ROI coordinates, pixel centers (index+0.5)*nm_per_pixel',
+        intensity_mode=_intensity_mode(owner),filter=owner.filter_var.get(),
+        circularity='4*pi*filled outer-contour area / physical outer perimeter^2; holes ignored; X/Y nm per pixel applied',
+        minimum_outer_circularity=_ii2d_detection_options(owner,tab)['minimum_outer_circularity'],
+        uncertainty='No independent-pixel error bars assumed; resampled pixels may be correlated',
+        records=__import__('json').loads(table.to_json(orient='records')))
+    metadata=str(Path(path).with_suffix('.json'))
+    with _export_capture_stream(open,metadata,'w',encoding='utf-8') as stream:
+        __import__('json').dump(payload,stream,indent=2)
+    getattr(owner,f'tab{tab}_export_status_var').set(f'2D measurements and definitions saved: {Path(path).name}')
+    return path,metadata
+
+
+@_auto_open_export
+def _ii2d_export_figures(owner, tab):
+    if _ii2d_dataframe(owner,tab).empty:
+        messagebox.showwarning(f'Tab {tab} 2D export','Run a direct 2D measurement first.',parent=owner.root);return
+    folder=_export_capture_folder(filedialog.askdirectory,parent=owner.root,title=f'Select folder for Tab {tab} 2D figures')
+    if not folder:return
+    _ii2d_render(owner,tab);_ii2d_plot(owner,tab)
+    figure=getattr(owner,f'tab{tab}_fig');figure.canvas.draw()
+    if tab==10:
+        panels=[('SelectedROI',[owner.tab10_ax_image,owner._tab10_cbar_image.ax]),
+            ('ThresholdFeatureArea',[owner.tab10_ax_profiles]),
+            ('SignedBackgroundSubtractedMap',[owner.tab10_ax_fit,owner._tab10_2d_cbar.ax]),
+            ('RMSDiameter_2DIntegratedIntensity',[owner.tab10_ax_tracking,owner._tab10_ax_tracking2])]
+    else:
+        panels=[('ProcessedPrimaryROI',[owner.tab11_ax_primary,owner._tab11_cbar.ax]),
+            ('SelectedROI',[owner.tab11_ax_selected]),
+            ('SignedBackgroundSubtractedMap',[owner.tab11_ax_fit,owner._tab11_2d_cbar.ax]),
+            ('SelectedROI_RMSDiameter_2DIntegratedIntensity',[owner.tab11_ax_current_tracking,owner._tab11_current_amp_ax]),
+            ('AllROIs_RMSDiameter_2DIntegratedIntensity',[owner.tab11_ax_all_tracking,owner._tab11_all_amp_ax])]
+    paths=[];visibility={axis:axis.get_visible() for axis in figure.axes}
+    frame=int(getattr(owner,f'tab{tab}_frame_var').get())
+    try:
+        for name,axes in panels:
+            for axis in figure.axes:axis.set_visible(axis in axes)
+            figure.canvas.draw()
+            path=os.path.join(folder,f'Tab{tab}_2D_{name}_FrameIndex{frame:03d}.png')
+            _export_capture_write(figure.savefig,path,dpi=300,bbox_inches='tight',pad_inches=.15,facecolor='white')
+            paths.append(path)
+    finally:
+        for axis,visible in visibility.items():axis.set_visible(visible)
+        figure.canvas.draw_idle()
+    figure=getattr(owner,f'tab{tab}_ii_fig');figure.canvas.draw()
+    path=os.path.join(folder,f'Tab{tab}_2D_Size_IntegratedIntensity_FrameIndex{frame:03d}.png')
+    _export_capture_write(figure.savefig,path,dpi=300,bbox_inches='tight',pad_inches=.15,facecolor='white')
+    paths.append(path)
+    getattr(owner,f'tab{tab}_export_status_var').set(f'Saved {len(paths)} direct 2D figures at 300 ppi.')
+    return paths
 def _axis_sidebar_minimum(paned, minimum=560):
     def resize(event=None):
         def enforce():
@@ -389,6 +1857,7 @@ def _tab10_refresh_detail_table(self):
 
 
 def _ii_refresh_table(self, tab, source):
+    if _ii2d_enabled(self,tab):return _ii2d_update_table(self,tab)
     tree = getattr(self, f'tab{tab}_ii_table', None)
     if tree is None:
         return
@@ -547,6 +2016,134 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvas
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk as _FigureNavigationToolbarBase
 from matplotlib.backend_bases import NavigationToolbar2 as _FigureNavigationBase
 
+from matplotlib.figure import Figure as _ColorbarFigure
+from matplotlib.transforms import Bbox as _ColorbarBbox
+from matplotlib.image import AxesImage as _ColorbarImage
+import re as _ColorbarRe
+
+
+def _image_colorbar_label(label, mappable):
+    text = str(label or '').strip()
+    lower = text.lower()
+    # Keep angular, spectral, probability and correlation quantities in their own units.
+    physical = ('phase', 'rad', 'db', 'power', 'acf', 'correlation', 'fraction',
+                'count', 'probability', 'frequency', 'error', 'distance', 'nm', 'support')
+    if any(_ColorbarRe.search(r'\b' + word + r'\b', lower) for word in physical):
+        return text
+    if any(word in lower for word in ('intensity', 'contrast', 'real part', 'imaginary part', 'amplitude')):
+        return 'Intensity (a.u.)'
+    if not text and isinstance(mappable, _ColorbarImage):
+        return 'Intensity (a.u.)'
+    return text
+
+
+class _ImageColorbarLocator:
+    """Place a bar against the actual aspect-corrected image axes on every draw."""
+    def __init__(self, parent, orientation):
+        self.parent = parent
+        self.orientation = orientation
+
+    def __call__(self, axes, renderer):
+        # Constrained layout may restore Figure.colorbar's fixed box aspect.
+        # Clear it here as well, immediately before Axes.apply_aspect runs.
+        axes.set_box_aspect(None)
+        axes.set_aspect('auto')
+        parent = self.parent
+        box = parent.get_position()
+        figure = parent.figure
+        fw, fh = figure.get_size_inches() * 72.0
+        width_pt, height_pt = box.width * fw, box.height * fh
+        font = float(parent.xaxis.label.get_size())
+        # A thin, readable bar sized from the smaller image dimension, in points.
+        thickness = max(4.0, min(12.0, min(width_pt, height_pt) / 28.0))
+        gap = max(5.0, .75 * font)
+        if self.orientation == 'horizontal':
+            return _ColorbarBbox.from_bounds(box.x0, box.y0 - (gap + thickness) / fh,
+                                            box.width, thickness / fh)
+        return _ColorbarBbox.from_bounds(box.x1 + gap / fw, box.y0,
+                                        thickness / fw, box.height)
+
+
+def _style_image_colorbar(bar):
+    mappable = bar.mappable
+    parent = getattr(mappable, 'axes', None)
+    if parent is None or parent not in bar.ax.figure.axes or parent is bar.ax:
+        return
+    # Figure.colorbar installs its own fixed 20:1 box aspect. Our locator owns
+    # thickness, so that additional constraint must not squeeze the bar again.
+    bar.ax.set_box_aspect(None)
+    bar.ax.set_aspect('auto')
+    if getattr(bar, '_image_colorbar_parent', None) is not parent:
+        locator = _ImageColorbarLocator(parent, bar.orientation)
+        old_locator = bar.ax.get_axes_locator()
+        # Retain Matplotlib's extension-triangle handling, using our responsive base box.
+        if old_locator is not None and hasattr(old_locator, '_orig_locator'):
+            old_locator._orig_locator = locator
+        else:
+            bar.ax.set_axes_locator(locator)
+        bar._image_colorbar_parent = parent
+    font = float(parent.xaxis.label.get_size())
+    ticks = parent.get_xticklabels() or parent.get_yticklabels()
+    tick_font = float(ticks[0].get_size()) if ticks else font
+    axis = bar.ax.xaxis if bar.orientation == 'horizontal' else bar.ax.yaxis
+    label = _image_colorbar_label(axis.label.get_text(), mappable)
+    bar.set_label(label, fontsize=font, labelpad=max(3., .45 * font))
+    bar.ax.tick_params(labelsize=tick_font, width=.8, length=3.)
+    axis.get_offset_text().set_fontsize(tick_font)
+
+
+def _style_figure_image_colorbars(figure):
+    for axes in list(figure.axes):
+        bar = getattr(axes, '_colorbar', None)
+        if bar is not None:
+            _style_image_colorbar(bar)
+
+
+def _layout_domain_analysis_grid(figure, grid):
+    """Reserve physical space for labels at both wide and narrow window sizes."""
+    width, height = figure.get_size_inches()
+    font = float(figure.axes[0].xaxis.label.get_size()) if figure.axes else 10.
+    scale = font / 10.
+    left, right = .85 * scale, .12 * scale
+    gap, bar_space = 1.75 * scale, .75 * scale
+    panel_width = max(.5, (width - left - right - gap - bar_space) / 2.)
+    bottom, top, row_gap = .65 * scale, .60 * scale, .95 * scale
+    panel_height = max(.5, (height - bottom - top - row_gap) / 2.)
+    grid.set_width_ratios((panel_width, gap, panel_width, bar_space))
+    grid.update(left=None, right=None, bottom=None, top=None, wspace=None, hspace=None)
+    figure.subplots_adjust(left=min(.20, left / width), right=1. - min(.06, right / width),
+                           bottom=min(.20, bottom / height), top=1. - min(.18, top / height),
+                           wspace=0., hspace=row_gap / panel_height)
+
+
+# Keep the original Matplotlib methods when the notebook is rerun in one kernel.
+if not hasattr(_ColorbarFigure, '_image_colorbar_original_colorbar'):
+    _ColorbarFigure._image_colorbar_original_colorbar = _ColorbarFigure.colorbar
+    _ColorbarFigure._image_colorbar_original_draw = _ColorbarFigure.draw
+
+
+def _responsive_figure_colorbar(self, *args, **kwargs):
+    bar = self._image_colorbar_original_colorbar(*args, **kwargs)
+    _style_image_colorbar(bar)
+    return bar
+
+
+def _responsive_figure_draw(self, renderer):
+    _intensity_update_figure(self)
+    if globals().get("_legend_apply_figure") is not None:
+        _tab6_prepare_pip(self)
+        _legend_apply_figure(self)
+    layout = getattr(self, '_responsive_analysis_layout', None)
+    if layout is not None:
+        layout()
+    _style_figure_image_colorbars(self)
+    return self._image_colorbar_original_draw(renderer)
+
+
+_ColorbarFigure.colorbar = _responsive_figure_colorbar
+_ColorbarFigure.draw = _responsive_figure_draw
+
+
 def _figure_navigation_active(canvas):
     toolbar = getattr(canvas, 'toolbar', None)
     return toolbar is not None and bool(toolbar.mode)
@@ -557,6 +2154,7 @@ class _FigureNavigationToolbar(_FigureNavigationToolbarBase):
         # Manual spacing controls need ownership of layout. Constrained layout
         # otherwise silently ignores every change made by the subplot sliders.
         figure = self.canvas.figure
+        figure._responsive_analysis_layout = None
         if figure.get_layout_engine() is not None:
             with matplotlib.rc_context({'figure.autolayout': False,
                                         'figure.constrained_layout.use': False}):
@@ -6141,12 +7739,7 @@ class CDIWorkflowApp:
         finite = np.isfinite(img)
         if not np.any(finite):
             return np.zeros_like(img, dtype=float)
-        vals = img[finite]
-        lo, hi = np.percentile(vals, (1, 99))
-        if hi <= lo:
-            hi = lo + 1e-12
-        out = np.nan_to_num((img - lo) / (hi - lo), nan=0.0, posinf=1.0, neginf=0.0)
-        return np.clip(out, 0, 1)
+        return np.where(finite, img, 0.0)
 
     def _apply_filter(self, img):
         kind = self.filter_var.get()
@@ -7738,12 +9331,441 @@ def _proc_set_original_roi_preset(self):
     if getattr(self, 'original_roi_w', None) and getattr(self, 'original_roi_h', None):
         _proc_set_roi_preset(self, self.original_roi_w, self.original_roi_h)
 
+def _intensity_app(owner):
+    return getattr(owner, 'app', owner)
+
+
+def _intensity_mode(owner):
+    return getattr(_intensity_app(owner), '_analysis_intensity_mode', 'Normalized')
+
+
+def _intensity_raw(owner):
+    return _intensity_mode(owner) == 'Raw'
+
+
+def _intensity_dtype(owner):
+    return np.float64 if _intensity_raw(owner) else np.float32
+
+
+def _intensity_display_pixels(owner, values):
+    return np.asarray(values) if _intensity_raw(owner) else np.clip(values, 0., 1.)
+
+
+def _intensity_rgb_values(owner, values):
+    if not _intensity_raw(owner):
+        return np.clip(values, 0., 1.)
+    frame = int(owner.proc_idx_var.get())
+    lo, hi = _intensity_limits(owner, frame, True)
+    return np.clip((np.asarray(values)-lo)/(hi-lo), 0., 1.)
+
+
+def _intensity_tag_figure(owner, figure, frame=0):
+    figure._intensity_owner = owner
+    figure._intensity_frame_index = int(frame)
+
+
+def _intensity_default_frame(owner, kind='processing'):
+    names = (('_lpa_frame_var', 'roi2_idx_var') if kind == 'line' else
+             ('tab9_roi4_frame_var',) if kind == 'roi9' else ('proc_idx_var',))
+    for name in names:
+        variable = getattr(owner, name, None)
+        if variable is not None:
+            return int(float(variable.get()))
+    return 0
+
+
+def _intensity_limits(owner, frame=0, display_adjustments=False):
+    owner = _intensity_app(owner)
+    if not _intensity_raw(owner):
+        return (0., 1.)
+    if _tab4_component_confirmed(owner) == 'Phase':
+        return (-np.pi, np.pi)
+    source = _tab4_component_stack(owner)
+    frame = max(0, min(int(frame), len(source)-1))
+    reference = _component_frame_normalization(owner, frame)
+    lo, hi = reference['minimum'], reference['maximum']
+    if not np.isfinite([lo, hi]).all() or hi <= lo:
+        hi = lo + max(1., abs(lo)*1e-6)
+    if display_adjustments:
+        contrast = max(float(owner.contrast_var.get()), 1e-6)
+        brightness = float(owner.brightness_var.get())
+        span = hi-lo
+        lo, hi = (lo+span*(.5+(-.5-brightness)/contrast),
+                  lo+span*(.5+(.5-brightness)/contrast))
+    return float(lo), float(hi)
+
+
+def _intensity_provenance(owner, frame=0):
+    owner = _intensity_app(owner)
+    reference = _component_frame_normalization(owner, frame)
+    component = reference['component']
+    raw = _intensity_raw(owner)
+    return dict(intensity_mode=_intensity_mode(owner), intensity_component=component,
+        intensity_units=('rad' if component == 'Phase' else 'reconstruction a.u.') if raw else 'normalized a.u.',
+        intensity_reference_min=reference['minimum'], intensity_reference_max=reference['maximum'],
+        intensity_min_source_frame=reference['minimum_frame'], intensity_max_source_frame=reference['maximum_frame'],
+        intensity_source_dataset=reference['dataset'], intensity_filter=str(owner.filter_var.get()),
+        intensity_sampling='native' if tuple(getattr(owner, 'roi_resolution', ())) ==
+            (getattr(owner, 'original_roi_w', -1), getattr(owner, 'original_roi_h', -1)) else 'resampled')
+
+
+def _intensity_require_scalar(owner):
+    owner = _intensity_app(owner)
+    if _intensity_raw(owner) and _tab4_component_confirmed(owner) == 'Phase':
+        raise ValueError('Raw Phase is wrapped angular data in radians. Gaussian/intensity and domain fits require '
+                         'a scalar component (Real, Imaginary or Amplitude); phase unwrapping is not applied automatically.')
+
+
+def _t7_threshold_value_changed(owner):
+    """Refresh the existing threshold controls on either measurement scale."""
+    if getattr(owner, '_tab1_factory_resetting', False) or getattr(owner, '_lpa_stack', None) is None:
+        return
+    _t7_threshold_snap_all(owner, redraw=False)
+    _t7_threshold_measure_redraw(owner)
+    _t7_threshold_update_table(owner)
+
+
+def _intensity_raw_resize(owner, values, width, height):
+    values = np.asarray(values, dtype=np.float64)
+    if values.shape == (int(height), int(width)):
+        return values.copy()
+    yy, xx = np.meshgrid((np.arange(int(height))+.5)*values.shape[0]/int(height)-.5,
+                         (np.arange(int(width))+.5)*values.shape[1]/int(width)-.5, indexing='ij')
+    coordinates = np.array([yy, xx])
+    if _tab4_component_confirmed(_intensity_app(owner)) == 'Phase':
+        # Interpolate on the unit circle, never across the discontinuity as a scalar.
+        real = map_coordinates(np.cos(values), coordinates, order=1, mode='nearest')
+        imag = map_coordinates(np.sin(values), coordinates, order=1, mode='nearest')
+        return np.arctan2(imag, real)
+    return map_coordinates(values, coordinates, order=3, mode='nearest', prefilter=True)
+
+
+def _intensity_raw_processed_frame(owner, index):
+    image = np.asarray(owner.roi_stack[index], dtype=np.float64)
+    valid = np.asarray(owner.local_mask, bool) & np.isfinite(image)
+    if not valid.any():
+        return np.zeros_like(image)
+    phase = _tab4_component_confirmed(owner) == 'Phase'
+    fill = float(np.angle(np.mean(np.exp(1j*image[valid])))) if phase else float(np.median(image[valid]))
+    clean = np.where(valid, image, fill)
+    kind = owner.filter_var.get()
+    strength = max(float(owner.strength_var.get()), .01)
+    if phase:
+        smooth = lambda sigma: np.arctan2(gaussian_filter(np.sin(clean), sigma), gaussian_filter(np.cos(clean), sigma))
+        if kind in ('Gaussian', 'Low-pass'):
+            processed = smooth(strength)
+        elif kind == 'High-pass':
+            processed = np.angle(np.exp(1j*(clean-smooth(strength))))
+        elif kind == 'Band-pass':
+            processed = np.angle(np.exp(1j*(smooth(strength)-smooth(2*strength))))
+        else:
+            processed = clean.copy()
+    elif kind in ('Gaussian', 'Low-pass'):
+        processed = gaussian_filter(clean, strength)
+    elif kind == 'High-pass':
+        processed = clean-gaussian_filter(clean, strength)
+    elif kind == 'Band-pass':
+        processed = gaussian_filter(clean, strength)-gaussian_filter(clean, 2*strength)
+    else:
+        processed = clean.copy()
+    # Raw values retain their sign and scale. Brightness/contrast only change the view limits.
+    return np.where(owner.local_mask, processed, 0.).astype(np.float64)
+
+
+def _intensity_figure_context(figure):
+    owner = getattr(figure, '_intensity_owner', None) or globals().get('app')
+    if owner is None:
+        return None
+    if getattr(figure, '_intensity_owner', None) is not None:
+        return owner, int(getattr(figure, '_intensity_frame_index', 0)), True
+    specifications = (('_proc_fig', 'proc_idx_var'), ('roi2_fig', 'roi2_idx_var'),
+        ('line_profile_fig', 'line_idx_var'), ('_lpa_fig', '_lpa_frame_var'),
+        ('pd_plot_fig', '_tab8_frame_var'), ('pd_fig', '_tab8_frame_var'),
+        ('tab9_roi4_fig', 'tab9_roi4_frame_var'), ('tab10_fig', 'tab10_frame_var'),
+        ('tab11_fig', 'tab11_frame_var'))
+    for figure_name, index_name in specifications:
+        if getattr(owner, figure_name, None) is figure:
+            variable = getattr(owner, index_name, None)
+            return owner, int(float(variable.get())) if variable is not None else 0, True
+    panel = getattr(owner, 'domain_periodicity', None)
+    if panel is not None and panel.figure is figure:
+        return owner, int(panel.frame.get()), True
+    if getattr(owner, '_figs', {}).get('roi') is figure:
+        return owner, int(owner.roi_index_var.get()), False
+    return None
+
+
+def _intensity_update_figure(figure):
+    context = _intensity_figure_context(figure)
+    if context is None:
+        return
+    owner, frame, display_adjustments = context
+    if not _intensity_raw(owner) or getattr(owner, 'recons', None) is None:
+        return
+    lo, hi = _intensity_limits(owner, frame, display_adjustments)
+    component = _tab4_component_confirmed(owner)
+    for axis in figure.axes:
+        if getattr(axis, '_intensity_exempt', False):
+            continue
+        text = (axis.get_title() + ' ' + axis.get_xlabel() + ' ' + axis.get_ylabel()).lower()
+        if any(word in text for word in ('fft', 'power', 'autocorrelation', 'spectrum', 'cycles/', 'displacement')):
+            continue
+        for image in axis.images:
+            image.set_clim(lo, hi)
+            if image.colorbar is not None:
+                image.colorbar.set_label('Phase (rad)' if component == 'Phase' else 'Intensity (a.u.)')
+
+
+def _intensity_invalidate_analysis(owner):
+    _ii2d_clear(owner,10)
+    _ii2d_clear(owner,11)
+    owner.roi_resolution_applied = False
+    for name in ('_roi2_stop_playback', '_tab8_v7_stop_playback', '_tab8_cancel_batch',
+                 '_tab9_roi4_stop', '_tab10_stop_fit', '_tab11_stop_fit', '_tab10_cancel_center_follow_job'):
+        method = globals().get(name)
+        if callable(method):
+            method(owner)
+    for method_name in ('_tab9_roi4_reset_tab10_handoff', '_tab11_clear_all'):
+        method = globals().get(method_name)
+        if callable(method):
+            method(owner)
+    panel = getattr(owner, 'domain_periodicity', None)
+    if panel is not None:
+        panel.reset()
+    for name, value in list(vars(owner).items()):
+        if name.startswith(('_tab6_', '_tab7', '_tab8', '_tab9', '_tab10', '_tab11', '_lpa_')):
+            if isinstance(value, (dict, list)) and any(part in name for part in
+                    ('results', 'detections', 'intensity_profiles', 'measurements')):
+                value.clear()
+            elif isinstance(value, pd.DataFrame) or any(part in name for part in
+                    ('_stack', 'last_fit', '_tracking_df', '_current_tracking_df', '_last_source_signature')):
+                if not callable(value):
+                    setattr(owner, name, None)
+    for name in ('roi2_stack', 'roi2_mask', 'roi2_coords', 'roi2_confirmed_coords',
+                 'line_source_stack', 'gauss2d_source_stack', '_roi_normalization_signature',
+                 '_tab8_roi3_coords', '_tab9_roi4_coords', '_tab9_roi4_stack', '_lpa_stack'):
+        setattr(owner, name, None)
+    for name in ('_tab10_center_cache', '_tab10_tracking_fixed_center', '_tab10_last_detected_core'):
+        setattr(owner, name, None)
+    owner._tab10_detection_diagnostics = {}
+    for name in ('_tab8_roi3_confirmed', '_tab9_roi1_ready', '_tab9_roi4_confirmed',
+                 '_tab10_roi4_confirmed', '_tab11_primary_ready'):
+        setattr(owner, name, False)
+    for tab in owner.nb.tabs()[6:12]:
+        for widget in _tab1_walk_widgets(owner.root.nametowidget(tab)):
+            if isinstance(widget, ttk.Treeview):
+                children = widget.get_children()
+                if children:
+                    widget.delete(*children)
+    for name, figure in list(vars(owner).items()):
+        if (name.startswith(('tab9_', 'tab10_', 'tab11_', 'pd_', '_lpa_'))
+                and isinstance(figure, matplotlib.figure.Figure)):
+            for axis in figure.axes:
+                if getattr(axis, '_colorbar', None) is not None:
+                    continue
+                for image in axis.images:
+                    image.set_data(np.ma.masked_all((2, 2)))
+                for line in axis.lines:
+                    line.set_data([], [])
+                for text in axis.texts:
+                    text.set_text('')
+            figure.canvas.draw_idle()
+
+
+def _tab4_set_intensity_mode(owner, mode):
+    mode = 'Raw' if mode == 'Raw' else 'Normalized'
+    owner.tab4_normalized_intensity_var.set(mode == 'Normalized')
+    owner.tab4_raw_intensity_var.set(mode == 'Raw')
+    if _intensity_mode(owner) == mode:
+        return
+    resolution = getattr(owner, 'roi_resolution', None)
+    can_rebuild = getattr(owner, 'roi_mask', None) is not None and getattr(owner, 'recons', None) is not None
+    owner._analysis_intensity_mode = mode
+    _intensity_invalidate_analysis(owner)
+    if can_rebuild and resolution is not None and min(resolution) > 0:
+        _proc_apply_resolution(owner, *resolution)
+        owner.update_processing_view()
+    owner.refresh_roi_image()
+    owner.proc_status_var.set(mode + ' Intensity selected. Primary ROI rebuilt; fetch/reconfirm downstream ROIs and recalculate results.')
+    owner.log('Tab 4 intensity mode: ' + mode + '. Previous analysis results cleared.')
+
+
+def _component_normalization_layout(self, frame_count):
+    """Identify source datasets without mixing the two legs of a cycle."""
+    paths = tuple(str(p) for p in (getattr(self, 'reconstruction_paths', None) or ()))
+    roots = tuple(str(getattr(self, name, None) or '') for name in
+                  ('_cycle_neg_to_pos_dir', '_cycle_pos_to_neg_dir'))
+    data_dir = str(getattr(self, 'data_dir', None) or '')
+    signature = (frame_count, paths, roots, data_dir)
+    previous = getattr(self, '_component_normalization_layout_cache', None)
+    if previous is not None and previous['signature'] == signature:
+        return previous
+    groups, frame_groups, source_frames = {}, [], []
+    for index in range(frame_count):
+        path = Path(paths[index]).resolve() if len(paths) == frame_count else None
+        dataset = None
+        if path is not None:
+            for root in roots:
+                if root:
+                    candidate = Path(root).resolve()
+                    if path.is_relative_to(candidate):
+                        dataset = candidate
+                        break
+            if dataset is None:
+                # NEW_V2 files reside in a separate loop directory per frame.
+                if re.fullmatch(r'(?:loop|frame|point)[_-]?\d+', path.parent.name, re.I):
+                    dataset = path.parent.parent
+                elif data_dir and path.is_relative_to(Path(data_dir).resolve()):
+                    dataset = Path(data_dir).resolve()
+                else:
+                    dataset = path.parent
+        elif data_dir:
+            dataset = Path(data_dir).resolve()
+        key = str(dataset).casefold() if dataset is not None else 'loaded_dataset'
+        if key not in groups:
+            groups[key] = {'dataset': str(dataset or ''),
+                           'dataset_label': dataset.name if dataset is not None else 'Loaded dataset',
+                           'indices': []}
+        group = groups[key]
+        local_frame = len(group['indices'])
+        if path is not None:
+            match = re.fullmatch(r'(?:loop|frame|point)[_-]?(\d+)', path.parent.name, re.I)
+            if match is not None:
+                local_frame = int(match.group(1))
+        group['indices'].append(index)
+        frame_groups.append(key)
+        source_frames.append(local_frame)
+    previous = {'signature': signature, 'groups': groups, 'frame_groups': frame_groups,
+                'source_frames': source_frames, 'paths': paths if len(paths) == frame_count else ()}
+    self._component_normalization_layout_cache = previous
+    return previous
+
+
+def _component_dataset_normalization(self):
+    """Cache a fixed full-image finite min/max for each source dataset."""
+    component = _tab4_component_confirmed(self)
+    source = _tab4_component_stack(self, component)
+    layout = _component_normalization_layout(self, len(source))
+    signature = ('full_component_dataset_minmax', component, id(source),
+                 tuple(source.shape), layout['signature'])
+    cache = getattr(self, '_component_frame_normalization_cache', None)
+    if cache is not None and cache['source'] is source and cache['signature'] == signature:
+        return cache
+    references = {}
+    for key, group in layout['groups'].items():
+        minimum, maximum = np.inf, -np.inf
+        minimum_index = maximum_index = None
+        finite_pixels = 0
+        for index in group['indices']:
+            frame = np.asarray(source[index], dtype=float)
+            finite = np.isfinite(frame)
+            count = int(np.count_nonzero(finite))
+            finite_pixels += count
+            if not count:
+                continue
+            values = frame if count == frame.size else frame[finite]
+            lo, hi = float(np.min(values)), float(np.max(values))
+            if lo < minimum:
+                minimum, minimum_index = lo, index
+            if hi > maximum:
+                maximum, maximum_index = hi, index
+        if finite_pixels == 0:
+            minimum = maximum = 0.0
+        paths = layout['paths']
+        references[key] = {
+            'component': component, 'dataset': group['dataset'],
+            'dataset_label': group['dataset_label'], 'frame_count': len(group['indices']),
+            'minimum': minimum, 'maximum': maximum, 'span': maximum - minimum,
+            'minimum_frame': layout['source_frames'][minimum_index] if minimum_index is not None else None,
+            'maximum_frame': layout['source_frames'][maximum_index] if maximum_index is not None else None,
+            'minimum_stack_index': minimum_index, 'maximum_stack_index': maximum_index,
+            'minimum_file': paths[minimum_index] if paths and minimum_index is not None else '',
+            'maximum_file': paths[maximum_index] if paths and maximum_index is not None else '',
+            'finite_pixels': finite_pixels, 'method': 'full_component_dataset_minmax'}
+    cache = {'source': source, 'component': component, 'signature': signature,
+             'layout': layout, 'references': references}
+    self._component_frame_normalization_cache = cache
+    return cache
+
+
+def _component_frame_normalization(self, index):
+    cache = _component_dataset_normalization(self)
+    index = int(index)
+    if index < 0 or index >= len(cache['source']):
+        raise IndexError('Normalization frame is outside the selected component stack.')
+    key = cache['layout']['frame_groups'][index]
+    reference = dict(cache['references'][key])
+    reference['frame'] = index
+    reference['source_frame'] = cache['layout']['source_frames'][index]
+    return reference
+
+
+def _component_normalization_signature(self):
+    return (_component_dataset_normalization(self)['signature'], _intensity_mode(self))
+
+
+def _normalize_component_frame_values(values, reference):
+    values = np.asarray(values, dtype=float)
+    if reference['span'] <= 0.0 or not np.isfinite(reference['span']):
+        return np.zeros_like(values)
+    normalized = (values - reference['minimum']) / reference['span']
+    return np.clip(np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+
+
+def _update_component_normalization_status(self, index):
+    reference = _component_frame_normalization(self, index)
+    cache = self._component_frame_normalization_cache
+    table = getattr(self, 'tab4_normalization_reference_table', None)
+    if table is not None:
+        if getattr(self, '_tab4_normalization_table_signature', None) != cache['signature']:
+            children = table.get_children()
+            if children:
+                table.delete(*children)
+            self._tab4_normalization_table_rows = {}
+            for key, item in cache['references'].items():
+                frame_label = lambda value: '—' if value is None else str(value)
+                row = table.insert('', 'end', values=(item['dataset_label'], item['component'],
+                    f"{item['minimum']:.10g}", frame_label(item['minimum_frame']),
+                    f"{item['maximum']:.10g}", frame_label(item['maximum_frame'])))
+                self._tab4_normalization_table_rows[key] = row
+            table.configure(height=max(1, min(4, len(cache['references']))))
+            self._tab4_normalization_table_signature = cache['signature']
+        key = cache['layout']['frame_groups'][int(index)]
+        row = self._tab4_normalization_table_rows[key]
+        table.selection_set(row)
+        table.see(row)
+    for column, title in (('minimum', 'Sweep minimum' if _intensity_raw(self) else 'Minimum → 0'), ('maximum', 'Sweep maximum' if _intensity_raw(self) else 'Maximum → 1')):
+        if table is not None:
+            table.heading(column, text=title)
+    units = 'rad' if reference['component'] == 'Phase' else 'a.u.'
+    text = (f"{reference['component']} | {reference['dataset_label']} | "
+            f"fixed across {reference['frame_count']} frames: "
+            f"({units} − minimum) / (maximum − minimum) → 0–1 | Tabs 6–12")
+    if reference['component'] == 'Phase':
+        text += ' | Phase is wrapped; 0–1 is an angular display scale.'
+    if _intensity_raw(self):
+        text = f"Raw Intensity | {reference['component']} | {reference['dataset_label']} | Original reconstruction values ({units}), no 0–1 clipping. Filters/resampling are explicit."
+        if reference['component'] == 'Phase':
+            text += ' Wrapped phase: circular resizing/filtering; scalar intensity/Gaussian fits are unavailable.'
+    status = getattr(self, 'tab4_normalization_status_var', None)
+    if status is not None:
+        status.set(text)
+    return reference
+
+
 def _proc_resize_image(self, image, width, height):
+    if _intensity_raw(self):
+        return _intensity_raw_resize(self, image, width, height)
     image = np.asarray(image, dtype=np.float32)
     image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
-    image = np.clip(image, 0.0, 1.0)
-    pil = Image.fromarray(np.uint8(image * 255.0), mode='L')
-    return np.asarray(pil.resize((int(width), int(height)), Image.Resampling.BICUBIC), dtype=np.float32) / 255.0
+    image = _intensity_display_pixels(self, image)
+    if image.shape == (int(height), int(width)):
+        return image.copy()
+    pil = Image.fromarray(image)
+    resized = np.asarray(pil.resize((int(width), int(height)), Image.Resampling.BICUBIC), dtype=np.float32)
+    return np.clip(resized, 0.0, 1.0)
+
+
 
 def _proc_resize_mask(self, mask, width, height):
     pil = Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode='L')
@@ -7785,27 +9807,32 @@ def _proc_apply_resolution(self, width, height):
     y0, y1 = (int(yy.min()), int(yy.max()))
     local_orig = np.asarray(self.roi_mask, dtype=bool)[y0:y1 + 1, x0:x1 + 1]
     resized_mask = _proc_resize_mask(self, local_orig, width, height)
-    new_stack = np.zeros((len(self.recons), height, width), dtype=np.float32)
+    normalization_signature = _component_normalization_signature(self)
+    normalization_records = []
+    new_stack = np.zeros((len(self.recons), height, width), dtype=_intensity_dtype(self))
     for i in range(len(self.recons)):
         image = np.asarray(self.recons[i, y0:y1 + 1, x0:x1 + 1], dtype=float).copy()
         valid = local_orig & np.isfinite(image)
         if np.any(valid):
             values = image[valid]
-            fill = float(np.median(values))
-            vmin = float(np.percentile(values, 1))
-            vmax = float(np.percentile(values, 99))
+            fill = (float(np.angle(np.mean(np.exp(1j*values)))) if _intensity_raw(self) and _tab4_component_confirmed(self) == 'Phase'
+                    else float(np.median(values)))
         else:
-            fill, vmin, vmax = (0.0, 0.0, 1.0)
+            fill = 0.0
+        reference = _component_frame_normalization(self, i)
+        normalization_records.append(reference)
         image[~valid] = fill
-        if vmax <= vmin:
-            vmax = vmin + 1e-12
-        image = np.clip((image - vmin) / (vmax - vmin), 0, 1)
+        reference['intensity_mode'] = _intensity_mode(self)
+        if not _intensity_raw(self):
+            image = _normalize_component_frame_values(image, reference)
         image[~local_orig] = 0.0
         r = _proc_resize_image(self, image, width, height)
         r[~resized_mask] = 0.0
         new_stack[i] = r
     self.roi_crop = {'xmin': x0, 'xmax': x1, 'ymin': y0, 'ymax': y1}
     self.roi_stack = new_stack
+    self._roi_normalization_signature = normalization_signature
+    self._roi_normalization_records = normalization_records
     self.local_mask = resized_mask
     self.original_roi_h, self.original_roi_w = local_orig.shape
     self.roi_resolution = (width, height)
@@ -7831,6 +9858,7 @@ def _proc_apply_resolution(self, width, height):
             pass
     self.log(f'SAME CONFIRMED ROI — resolution applied: original {(self.original_roi_w, self.original_roi_h)}, output {(width, height)}, stack={self.roi_stack.shape}')
 
+
 def _proc_apply_from_gui(self):
     try:
         width = int(self.roi_width_var.get())
@@ -7843,6 +9871,10 @@ def _proc_apply_from_gui(self):
 def _proc_image(self, index):
     if not getattr(self, 'roi_resolution_applied', False):
         raise RuntimeError('Apply SAME CONFIRMED ROI resolution first.')
+    if getattr(self, '_roi_normalization_signature', None) != _component_normalization_signature(self):
+        raise RuntimeError('Apply ROI resolution again for the confirmed Tab 4 component.')
+    if _intensity_raw(self):
+        return _intensity_raw_processed_frame(self, index)
     image = np.asarray(self.roi_stack[index], dtype=float)
     valid = self.local_mask & np.isfinite(image)
     if not np.any(valid):
@@ -7850,28 +9882,21 @@ def _proc_image(self, index):
     vals = image[valid]
     clean = image.copy()
     clean[~valid] = float(np.median(vals))
-    vmin = float(np.percentile(vals, 1))
-    vmax = float(np.percentile(vals, 99))
-    if vmax <= vmin:
-        vmax = vmin + 1e-12
-    image_norm = np.clip((clean - vmin) / (vmax - vmin), 0, 1)
+    image_norm = clean
     kind = self.filter_var.get()
     strength = max(float(self.strength_var.get()), 0.01)
     if kind in ('Gaussian', 'Low-pass'):
         processed = gaussian_filter(image_norm, sigma=strength)
     elif kind == 'High-pass':
-        processed = image_norm - gaussian_filter(image_norm, sigma=strength)
-        mn, mx = (float(processed.min()), float(processed.max()))
-        processed = (processed - mn) / (mx - mn + 1e-12)
+        processed = 0.5 + image_norm - gaussian_filter(image_norm, sigma=strength)
     elif kind == 'Band-pass':
-        processed = gaussian_filter(image_norm, sigma=strength) - gaussian_filter(image_norm, sigma=strength * 2)
-        mn, mx = (float(processed.min()), float(processed.max()))
-        processed = (processed - mn) / (mx - mn + 1e-12)
+        processed = 0.5 + gaussian_filter(image_norm, sigma=strength) - gaussian_filter(image_norm, sigma=strength * 2)
     else:
         processed = image_norm.copy()
     processed = np.where(self.local_mask, processed, 0.0)
     processed = np.clip((processed - 0.5) * float(self.contrast_var.get()) + 0.5 + float(self.brightness_var.get()), 0, 1)
-    return processed.astype(np.float32)
+    return processed.astype(_intensity_dtype(self))
+
 
 def _proc_fft(self, image):
     F = np.fft.fftshift(_compute_fft2(image))
@@ -7902,7 +9927,7 @@ def _proc_update(self):
     self.current_index = idx
     image = _proc_image(self, idx)
     view = self.view_var.get()
-    if view == 'Image':
+    if view == 'Image' or _tab6_pip_enabled(self):
         display = image
     elif view == 'FFT':
         _, display = _proc_fft(self, image)
@@ -7920,7 +9945,7 @@ def _proc_update(self):
     self._proc_display_shape = tuple(np.asarray(display).shape[:2])
     self._proc_update_physical_axes_and_colorbar(display)
     field = float(self.real_fields_mT[idx])
-    self._proc_title.set_text(f'{view} | Field = {field:+.2f} mT | ROI = {self.roi_resolution[0]} × {self.roi_resolution[1]}')
+    self._proc_title.set_text(f'{"Image" if _tab6_pip_enabled(self) else view} | Field = {field:+.2f} mT | ROI = {self.roi_resolution[0]} × {self.roi_resolution[1]}')
     self.proc_field_var.set(f'Frame No. {idx + 1}/{len(self.recons)} | Equivalent Field: {field:+.2f} mT')
     self.proc_roi_info_var.set(f'ROI = {self.roi_resolution[0]} × {self.roi_resolution[1]} px | pixels={int(self.local_mask.sum())}')
     self._proc_draw_secondary_roi_patch(confirmed=getattr(self, 'roi2_confirmed_coords', None) is not None or getattr(self, 'roi2_stack', None) is not None, redraw=False)
@@ -7949,9 +9974,10 @@ def _proc_blob(self):
         self.update_processing_view()
     if self.current_processed is None:
         return
+    _intensity_require_scalar(self)
     img = self.current_processed
     vals = img[self.local_mask]
-    threshold = filters.threshold_otsu(vals) if np.any(vals > 0) else 0.5
+    threshold = filters.threshold_otsu(vals[np.isfinite(vals)]) if _intensity_raw(self) and np.isfinite(vals).any() else (filters.threshold_otsu(vals) if np.any(vals > 0) else 0.5)
     binary = (img > threshold) & self.local_mask
     lab = measure.label(binary)
     props = measure.regionprops(lab)
@@ -7971,6 +9997,7 @@ def _proc_blob(self):
     self.log(f'Blob analysis: {len(props)} connected regions found.')
 
 def _proc_show_toplevel(self, fig, title, width, height):
+    _intensity_tag_figure(self, fig, _intensity_default_frame(self))
     try:
         plt.close(fig)
     except Exception:
@@ -8003,7 +10030,7 @@ def _proc_choose_folder(self):
         self.output_dir = folder
 
 def _proc_rgb(self, image):
-    return (plt.get_cmap(self.colormap_var.get())(np.clip(image, 0, 1))[..., :3] * 255).astype(np.uint8)
+    return (plt.get_cmap(self.colormap_var.get())(_intensity_rgb_values(self, image))[..., :3] * 255).astype(np.uint8)
 
 @_auto_open_export
 def _proc_export_rgb(self, image):
@@ -8268,6 +10295,7 @@ def _extract_line_profiles(self, image, x0, y0, samples=800):
 
 def _fit_fixed_center_1d_gaussian(self, t, avg):
     """Fit B + A exp[-t²/(2 sigma²)] with center fixed at t=0."""
+    _intensity_require_scalar(self)
     t = np.asarray(t, dtype=float)
     y = np.asarray(avg, dtype=float)
     good = np.isfinite(t) & np.isfinite(y)
@@ -19660,7 +21688,7 @@ def _tab7_update_image_color_final(self, idx=None, preserve_lines=True):
         artist.set_cmap(cmap_name)
     except Exception:
         artist.set_cmap('RdBu_r')
-    artist.set_data(np.clip(img, 0.0, 1.0))
+    artist.set_data(_intensity_display_pixels(self, img))
     artist.set_extent((0.0, w * sx, 0.0, h * sy))
     artist.set_clim(0.0, 1.0)
     ax = self.line_profile_ax_image
@@ -19700,6 +21728,7 @@ def _tab7_update_image_color_final(self, idx=None, preserve_lines=True):
     except Exception:
         pass
     self.line_profile_canvas_image.draw_idle()
+
 CDIWorkflowApp._line_profile_update_image = _tab7_update_image_color_final
 
 def _tab7_draw_measurement_final(self):
@@ -20748,7 +22777,7 @@ def _tab7_final_render_frame(self, idx, preserve_zoom=True):
         self._tab7_view_nm = None
     ax = self.line_profile_ax_image
     artist = self.line_profile_image
-    artist.set_data(np.clip(image, 0.0, 1.0))
+    artist.set_data(_intensity_display_pixels(self, image))
     try:
         cmap = str(self.colormap_var.get()).strip()
         artist.set_cmap(cmap if cmap else 'RdBu_r')
@@ -20799,6 +22828,7 @@ def _tab7_final_render_frame(self, idx, preserve_zoom=True):
         self.line_profile_canvas_graph.draw_idle()
     except Exception:
         pass
+
 
 def _tab7_final_extract_profile(self, image, p0, p1):
     x0, y0 = map(float, p0)
@@ -21807,7 +23837,7 @@ def _tab7_render_copied_roi2_final(self, idx=0, preserve_zoom=True):
         artist.set_cmap(cmap)
     except Exception:
         artist.set_cmap('RdBu_r')
-    artist.set_data(np.clip(img, 0.0, 1.0))
+    artist.set_data(_intensity_display_pixels(self, img))
     artist.set_clim(float(clim[0]), float(clim[1]))
     full = (0.0, float(w * sx), 0.0, float(h * sy))
     ax.set_axis_on()
@@ -21851,6 +23881,7 @@ def _tab7_render_copied_roi2_final(self, idx=0, preserve_zoom=True):
         self.line_profile_canvas_graph.draw_idle()
     except Exception:
         pass
+
 CDIWorkflowApp._tab7_final_render_frame = _tab7_render_copied_roi2_final
 CDIWorkflowApp._line_profile_update_image = _tab7_render_copied_roi2_final
 _TAB6_CONFIRM_FOR_COPY = CDIWorkflowApp.confirm_secondary_roi_from_processing
@@ -22169,7 +24200,7 @@ def _tab7r_render_frame(self, idx=0, preserve_zoom=True):
         artist.set_cmap(self._tab7r_cmap)
     except Exception:
         artist.set_cmap('RdBu_r')
-    artist.set_data(np.clip(img, 0.0, 1.0))
+    artist.set_data(_intensity_display_pixels(self, img))
     artist.set_clim(*self._tab7r_clim)
     artist.set_extent((0.0, w * sx, 0.0, h * sy))
     ax.set_xlabel('X (nm)')
@@ -22205,6 +24236,7 @@ def _tab7r_render_frame(self, idx=0, preserve_zoom=True):
     self._tab7r_redraw_lines()
     self.line_profile_canvas_image.draw_idle()
     self.line_profile_canvas_graph.draw_idle()
+
 
 def _tab7r_redraw_lines(self):
     ax = self.line_profile_ax_image
@@ -24846,9 +26878,10 @@ def _tab6_export_figure(self, image, idx, dpi=300, title_prefix='ROI'):
     except Exception:
         pass
     fig = plt.figure(figsize=(8.6, 7.2), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
     ax = fig.add_axes([0.1, 0.1, 0.76, 0.82])
     cax = fig.add_axes([0.89, 0.1, 0.035, 0.82])
-    im = ax.imshow(np.clip(image, 0.0, 1.0), cmap=cmap_name, origin='lower', interpolation='nearest', vmin=0.0, vmax=1.0, aspect='equal')
+    im = ax.imshow(_intensity_display_pixels(self, image), cmap=cmap_name, origin='lower', interpolation='nearest', vmin=0.0, vmax=1.0, aspect='equal')
     physical = False
     try:
         base = self._proc_get_tab5_base_pixel_size()
@@ -24889,6 +26922,7 @@ def _tab6_export_figure(self, image, idx, dpi=300, title_prefix='ROI'):
     cb.set_label('Intensity', rotation=90)
     fig.canvas.draw()
     return fig
+
 
 def _tab6_format_to_args(value):
     """Map the Tab-6 export dropdown label to the existing exporter args."""
@@ -25025,6 +27059,7 @@ def _tab6_mp4_complete(self, indices, filename):
     writer = None
     try:
         fig = plt.figure(figsize=(8.6, 7.2), dpi=dpi, facecolor='white')
+        _intensity_tag_figure(self, fig, _intensity_default_frame(self, 'processing'))
         ax = fig.add_axes([0.1, 0.1, 0.76, 0.82])
         cax = fig.add_axes([0.89, 0.1, 0.035, 0.82])
         writer = None
@@ -25054,7 +27089,7 @@ def _tab6_mp4_complete(self, indices, filename):
                     cmap_name = candidate
             except Exception:
                 pass
-            im = ax.imshow(np.clip(image, 0.0, 1.0), cmap=cmap_name, origin='lower', interpolation='nearest', vmin=0.0, vmax=1.0, aspect='equal')
+            im = ax.imshow(_intensity_display_pixels(self, image), cmap=cmap_name, origin='lower', interpolation='nearest', vmin=0.0, vmax=1.0, aspect='equal')
             physical = False
             try:
                 base = self._proc_get_tab5_base_pixel_size()
@@ -25124,6 +27159,7 @@ def _tab6_mp4_complete(self, indices, filename):
     self.log(f'MP4 saved: {path} | frames={len(indices)} | fps={fps} | dpi={dpi} | axes+colorbar')
     _tab6_open_output_folder(folder)
     messagebox.showinfo('MP4 Export', f'MP4 successfully saved:\n\n{path}\n\nFrames: {len(indices)}\nFPS: {fps}\nDPI: {dpi}\nAxes + colorbar included.', parent=self.root)
+
 
 def _tab6_single_mp4_complete(self):
     i = int(self.proc_idx_var.get())
@@ -26021,6 +28057,7 @@ def _t7v2_export_plot(self):
 
         # --- ROI2 export ---
         roi_fig = plt.figure(figsize=(8.6, 7.4), dpi=300, facecolor='white')
+        _intensity_tag_figure(self, roi_fig, _intensity_default_frame(self, 'line'))
         roi_ax = roi_fig.add_axes([0.09, 0.10, 0.77, 0.82])
         roi_cax = roi_fig.add_axes([0.89, 0.10, 0.035, 0.82])
         roi_im = roi_ax.imshow(image, origin='lower', interpolation='nearest',
@@ -26069,6 +28106,7 @@ def _t7v2_export_plot(self):
 
         # --- line-profile export ---
         plot_fig = plt.figure(figsize=(8.6, 6.8), dpi=300, facecolor='white')
+        _intensity_tag_figure(self, plot_fig, _intensity_default_frame(self, 'line'))
         plot_ax = plot_fig.add_axes([0.10, 0.10, 0.83, 0.82])
         plot_ax.set_xlabel('Line Length (nm)')
         plot_ax.set_ylabel('Intensity')
@@ -28052,7 +30090,7 @@ def _tab8_multiscale_labels(self, signal, mask, valid, dmin, dmax):
     if np.any(minimum > available):
         return np.zeros(mask.shape, dtype=np.int32)
     maximum = np.minimum(available, np.maximum(minimum, dmax / (2*np.sqrt(2)*metric)))
-    peaks = blob_log(np.asarray(np.where(valid, np.maximum(signal, 0), 0), dtype=np.float32), min_sigma=minimum,
+    peaks = blob_log(np.asarray(np.where(valid, np.maximum(signal, 0), 0), dtype=_intensity_dtype(self)), min_sigma=minimum,
         max_sigma=maximum, num_sigma=count, threshold=None, threshold_rel=threshold,
         overlap=.5, log_scale=True, exclude_border=False)
     markers = np.zeros(mask.shape, dtype=np.int32)
@@ -28072,6 +30110,7 @@ def _tab8_multiscale_labels(self, signal, mask, valid, dmin, dmax):
         seeded[0] = False
         return np.where(seeded[regions], regions, 0).astype(np.int32)
     return watershed(-signal, markers, mask=mask).astype(np.int32)
+
 
 
 def _tab8_local_candidate_snr(signal, component, valid, labels, diameter, global_noise):
@@ -29438,7 +31477,7 @@ def _tab8_v7_confirm_roi3(self):
 
     self._tab8_roi3_coords = dict(c, xmin=x0, xmax=x1, ymin=y0, ymax=y1)
     self._tab8_pending_roi3_coords = None
-    self._tab8_roi3_stack = primary[:, y0:y1 + 1, x0:x1 + 1].astype(np.float32, copy=True)
+    self._tab8_roi3_stack = primary[:, y0:y1 + 1, x0:x1 + 1].astype(_intensity_dtype(self), copy=True)
     _tab8_roi_apply_shape(self)
     self._tab8_roi3_shape = self._tab8_roi3_stack.shape[1:3]
     self._tab8_roi3_xy_extent = (
@@ -29481,6 +31520,7 @@ def _tab8_v7_confirm_roi3(self):
     except Exception:
         pass
     return True
+
 
 
 def _tab8_v7_apply_fixed_axes(self):
@@ -29720,10 +31760,13 @@ def _tab6_build_exact_processed_primary_stack(self):
     except Exception:
         brightness=0.0
 
+    if _intensity_raw(self):
+        contrast, brightness = 1., 0.
     signature=(
         id(base),tuple(np.asarray(base).shape),
         id(local),tuple(np.asarray(local).shape),
-        kind,round(strength,12),round(contrast,12),round(brightness,12)
+        kind,round(strength,12),round(contrast,12),round(brightness,12),
+        _component_normalization_signature(self)
     )
 
     cached=getattr(self,'_tab6_exact_processed_primary_stack_cache',None)
@@ -29733,7 +31776,7 @@ def _tab6_build_exact_processed_primary_stack(self):
 
     frames=[]
     for i in range(n):
-        arr=np.asarray(_proc_image(self,i),dtype=np.float32)
+        arr=np.asarray(_proc_image(self,i),dtype=_intensity_dtype(self))
         if arr.ndim!=2 or arr.shape!=shape:
             raise RuntimeError(
                 f'Tab 6 processed Primary ROI1 frame {i+1}/{n} '
@@ -29741,11 +31784,12 @@ def _tab6_build_exact_processed_primary_stack(self):
             )
         frames.append(arr)
 
-    processed=np.stack(frames,axis=0).astype(np.float32,copy=True)
+    processed=np.stack(frames,axis=0).astype(_intensity_dtype(self),copy=True)
 
     self._tab6_exact_processed_primary_stack_cache=processed
     self._tab6_exact_processed_primary_stack_signature=signature
     return processed
+
 
 
 def _tab8_v7_sync_source(self, preserve_current=True):
@@ -29763,7 +31807,7 @@ def _tab8_v7_sync_source(self, preserve_current=True):
         if not callable(builder):
             raise RuntimeError('Tab 6 processed-stack builder is unavailable.')
         processed = builder()
-        processed = np.asarray(processed, dtype=np.float32)
+        processed = np.asarray(processed, dtype=_intensity_dtype(self))
         if processed.ndim != 3 or processed.shape[0] < 1:
             raise RuntimeError(f'Invalid processed Primary ROI1 stack shape: {processed.shape}.')
     except Exception as exc:
@@ -29909,6 +31953,7 @@ def _tab8_v7_sync_source(self, preserve_current=True):
     )
     _tab8_sensitivity_sync(self)
     return True
+
 
 
 def _tab8_v7_play(self):
@@ -31831,7 +33876,7 @@ def _tab9_roi4_get_current_processed(self, idx):
             return None
     try:
         stack = np.asarray(
-            self._tab9_roi1_stack, dtype=np.float32
+            self._tab9_roi1_stack, dtype=_intensity_dtype(self)
         )
         ii = max(0, min(int(idx), stack.shape[0] - 1))
         return stack[ii]
@@ -31843,6 +33888,7 @@ def _tab9_roi4_get_current_processed(self, idx):
         except Exception:
             pass
         return None
+
 
 
 def _tab9_roi4_draw_rect(self, confirmed=False, redraw=True):
@@ -32482,7 +34528,7 @@ def _tab9_roi4_confirm(self):
 
     try:
         stack=np.asarray(
-            self._tab9_roi1_stack,dtype=np.float32
+            self._tab9_roi1_stack,dtype=_intensity_dtype(self)
         )
         if stack.ndim!=3:
             raise ValueError(
@@ -32554,6 +34600,7 @@ def _tab9_roi4_confirm(self):
     )
     self.tab9_roi4_canvas.draw_idle()
     return True
+
 
 
 def _tab9_roi4_clear(self):
@@ -32654,7 +34701,7 @@ def _tab9_roi4_show_frame(self,idx,preserve_zoom=True):
     if not getattr(self,'_tab9_roi1_ready',False):
         return
 
-    stack=np.asarray(self._tab9_roi1_stack,dtype=np.float32)
+    stack=np.asarray(self._tab9_roi1_stack,dtype=_intensity_dtype(self))
     if stack.ndim!=3 or stack.shape[0]==0:
         return
 
@@ -32712,7 +34759,7 @@ def _tab9_roi4_show_frame(self,idx,preserve_zoom=True):
         if confirmed:
             cs=getattr(self,'_tab9_roi4_stack',None)
             if cs is not None:
-                cs=np.asarray(cs,dtype=np.float32)
+                cs=np.asarray(cs,dtype=_intensity_dtype(self))
                 if cs.ndim==3 and cs.shape[0]==n:
                     roi4_data=cs[idx]
 
@@ -32821,6 +34868,7 @@ def _tab9_roi4_show_frame(self,idx,preserve_zoom=True):
         )
     )
     self.tab9_roi4_canvas.draw_idle()
+
 
 
 def _tab9_roi4_frame_changed(self,value=None):
@@ -33638,6 +35686,7 @@ def _tab9_roi4_export_figure(self, idx, dpi, fmt='PNG'):
     # Export ROI4 with local coordinates starting at 0 nm.
     ext = (0.0, roi4_w_nm, 0.0, roi4_h_nm)
     fig = plt.figure(figsize=(7.2, 6.5), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
     ax = fig.add_axes([0.11, 0.11, 0.72, 0.78])
     cax = fig.add_axes([0.86, 0.11, 0.04, 0.78])
 
@@ -34001,7 +36050,7 @@ def _tab10_sync_roi4_from_tab9(self, preserve_frame=True):
     previous_scope = self._tab10_ii_scope
     previous_range = (int(self.tab10_start_var.get()), int(self.tab10_end_var.get()))
     previous_scale = getattr(self, "_tab10_roi4_scale", None)
-    source=np.asarray(source,dtype=np.float32)
+    source=np.asarray(source,dtype=_intensity_dtype(self))
     if source.ndim!=3 or source.shape[0]<1:
         self.tab10_status_var.set(
             f'Invalid Tab 9 processed Primary ROI1 stack: {source.shape}'
@@ -34021,7 +36070,7 @@ def _tab10_sync_roi4_from_tab9(self, preserve_frame=True):
         return False
 
     # Prefer the frozen stack only when it matches the CURRENT coordinates and shape.
-    frozen=np.asarray(getattr(self,'_tab9_roi4_stack',None),dtype=np.float32) \
+    frozen=np.asarray(getattr(self,'_tab9_roi4_stack',None),dtype=_intensity_dtype(self)) \
         if getattr(self,'_tab9_roi4_stack',None) is not None else None
     fc=getattr(self,'_tab9_roi4_stack_coords',None)
     expected_shape=(source.shape[0],ymax-ymin+1,xmax-xmin+1)
@@ -34141,6 +36190,7 @@ def _tab10_sync_roi4_from_tab9(self, preserve_frame=True):
         self._tab10_ii_recalculate_job = self.root.after(
             250, lambda: _tab10_recalculate_intensity(self))
     return True
+
 
 
 
@@ -34694,6 +36744,7 @@ def _tab10_fit_roi4(self, frame_idx, detection=None):
     result['analysis_position_min_nm'] = float(np.min(t_nm))
     result['analysis_position_max_nm'] = float(np.max(t_nm))
     result['gaussian_covariance'] = np.asarray(fit['covariance'], float).copy()
+    result.update(_intensity_provenance(self, int(frame_idx)))
     _tab10_update_integrated_result(self, result)
     _tab10_cache_intensity_profile(self, result)
     last = getattr(self, '_tab10_last_fit', None)
@@ -35282,6 +37333,7 @@ def _tab10_11_dfit_from_profiles(profiles, t_px, sx=1.0, sy=1.0, center=None, th
 
 def _tab10_render_current(self, idx=None):
     """Refresh all four Tab-10 panels for the selected confirmed ROI4 frame."""
+    if _ii2d_enabled(self,10):return _ii2d_render_safe(self,10,idx)
     if getattr(self, '_tab10_roi4_stack', None) is None:
         return
     n = len(self._tab10_roi4_stack)
@@ -35388,9 +37440,19 @@ def _tab10_render_current(self, idx=None):
             self.tab10_ax_profiles.plot(t_nm, profiles[float(angle)], linewidth=1.2, label=f'{angle:g}°')
         self.tab10_ax_profiles.plot(t_nm, avg, color='black', linewidth=2.8, label='Average')
     self.tab10_ax_profiles.axvline(0.0, linestyle='--', linewidth=1.0)
+    self.tab10_ax_profiles.set_aspect('auto', adjustable='box')
+    try: self.tab10_ax_profiles.set_box_aspect(None)
+    except (AttributeError, TypeError): pass
+    profile_x = np.concatenate([np.asarray(line.get_xdata(), float) for line in self.tab10_ax_profiles.lines if len(line.get_xdata())])
+    profile_x = profile_x[np.isfinite(profile_x)]
+    if profile_x.size:
+        xlo, xhi = float(np.min(profile_x)), float(np.max(profile_x))
+        xpad = max(0.03*(xhi-xlo), float(np.nanmedian(np.diff(np.unique(profile_x)))) if np.unique(profile_x).size > 1 else 1.0)
+        self.tab10_ax_profiles.set_xlim(xlo-xpad, xhi+xpad)
     self.tab10_ax_profiles.set_title(f'Selected Line Profiles')
     self.tab10_ax_profiles.set_xlabel('Position from fixed center (nm)'); self.tab10_ax_profiles.set_ylabel('Intensity (a.u.)')
-    self.tab10_ax_profiles.legend(fontsize=8, loc='best'); self.tab10_ax_profiles.grid(alpha=0.2)
+    self.tab10_ax_profiles.legend(fontsize=7, loc='upper right', ncol=2); self.tab10_ax_profiles.grid(alpha=0.2)
+    self.tab10_fig.subplots_adjust(wspace=0.34, left=0.07, right=0.96, bottom=0.08, top=0.94)
 
     # Keep Panel 3 clean until a fit is requested.
     if getattr(self, '_tab10_last_fit', None) is None:
@@ -35490,6 +37552,7 @@ def _tab10_range_spinbox_changed(self, which=None, event=None):
 
 
 def _tab10_frame_changed(self, value=None):
+    if _ii2d_enabled(self,10):return _ii2d_frame_changed(self,10,value)
     try:
         idx = int(round(float(value))) if value is not None else int(self.tab10_frame_var.get())
     except Exception:
@@ -35548,6 +37611,7 @@ def _tab10_reset_center_follow(self):
 
 
 def _tab10_toggle_fix_center(self):
+    if _ii2d_enabled(self,10):return _ii2d_run(self,10)
     if self._tab10_ii_busy:
         return
     if self._tab10_center_follow_enabled:
@@ -35622,6 +37686,7 @@ def _tab10_queue_center_follow(self):
 
 
 def _tab10_recalculate_center(self):
+    if _ii2d_enabled(self,10):return _ii2d_run(self,10)
     if self._tab10_ii_busy:
         return
     if getattr(self, '_tab10_roi4_stack', None) is None:
@@ -35651,6 +37716,7 @@ def _tab10_draw_fit_result(self, result):
         except Exception:pass
         self._tab10_fit_residual_ax=None
     self.tab10_ax_fit.clear()
+    _ii2d_prepare_line_axis(self.tab10_ax_fit)
     t=np.asarray(result['t_nm'],float); avg=np.asarray(result['average_profile'],float)
     if result.get('core_detected') is False:
         self.tab10_ax_fit.plot(t, avg, color='black', label='Average full profile')
@@ -35710,6 +37776,7 @@ def _tab10_draw_fit_result(self, result):
 
 
 def _tab10_fit_current(self, preserve_tracking=False):
+    if _ii2d_enabled(self,10):return _ii2d_run(self,10)
     _tab10_cancel_center_follow_job(self)
     if self._tab10_ii_busy:
         return
@@ -35898,6 +37965,7 @@ def _tab10_plot_axis_changed(self, *_args):
 
 
 def _tab10_track_all(self):
+    if _ii2d_enabled(self,10):return _ii2d_run(self,10,tracking=True)
     _tab10_cancel_center_follow_job(self)
     if self._tab10_ii_busy:
         return
@@ -36190,6 +38258,7 @@ def _tab10_track_all(self):
 @_auto_open_export
 def _tab10_export_current_profile_csv(self):
     """Export the current frame's raw/Gaussian line profiles."""
+    if _ii2d_enabled(self,10):return _ii2d_export_tables(self,10,current=True)
     r = getattr(self, '_tab10_last_fit', None)
     if not isinstance(r, dict):
         messagebox.showwarning(
@@ -36229,6 +38298,7 @@ def _tab10_export_selected_range_csvs(self):
     2) Tab10_Gaussian_LineProfiles_...csv
     3) Tab10_DFit_LineProfiles_...csv
     """
+    if _ii2d_enabled(self,10):return _ii2d_export_tables(self,10)
     _tab10_sync_intensity_values(self)
     records = getattr(self, '_tab10_intensity_profiles', None) or {}
     df = getattr(self, '_tab10_tracking_df', None)
@@ -36381,6 +38451,7 @@ def _tab10_export_selected_range_csvs(self):
 @_auto_open_export
 def _tab10_export_tracking_csv(self):
     """Export Tab-10 tracking data with explicit Gaussian/D-FIT prefixes."""
+    if _ii2d_enabled(self,10):return _ii2d_export_tables(self,10)
     _tab10_sync_intensity_values(self)
     df = getattr(self, '_tab10_tracking_df', None)
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -36869,6 +38940,7 @@ def _tab10_refresh_layout(self):
 @_auto_open_export
 def _tab10_export_figures_png(self):
     """Export the four visible Tab-10 panels as separate 300-ppi PNG files."""
+    if _ii2d_enabled(self,10):return _ii2d_export_figures(self,10)
     if getattr(self, 'tab10_fig', None) is None:
         messagebox.showwarning('Tab 10 Export', 'Tab 10 figure is not available.', parent=self.root)
         return
@@ -37227,6 +39299,9 @@ def _ii_add_export_columns(table, source, enabled):
                        ('detection_snr', 'Detection_SNR'), ('error', 'Analysis_Error')):
         if key in source:
             table[label] = source[key]
+    for key in ('intensity_mode', 'intensity_component', 'intensity_units', 'intensity_reference_min', 'intensity_reference_max', 'intensity_min_source_frame', 'intensity_max_source_frame', 'intensity_source_dataset', 'intensity_filter', 'intensity_sampling'):
+        if key in source:
+            table[key] = source[key]
     if enabled:
         for key, label in _II_EXPORT_COLUMNS.items():
             if key.endswith('status'):
@@ -37349,6 +39424,7 @@ def _tab11_cache_intensity(self, result):
 
 
 def _tab11_sync_intensity(self):
+    if _ii2d_enabled(self,11):return _ii2d_sync(self,11)
     enabled = self.tab11_integrated_intensity_var.get()
     cache = self._tab11_intensity_profiles
     for result in cache.values():
@@ -37491,6 +39567,7 @@ def _tab11_export_series_table(self, source, roi, figure):
 
 @_auto_open_export
 def _tab11_export_tables_by_figure(self):
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11)
     if self._tab11_ii_busy or self._tab11_ii_dirty:
         messagebox.showwarning('Tab 11 Export', 'Finish or rerun analysis before exporting changed settings.', parent=self.root)
         return
@@ -37607,6 +39684,8 @@ def _tab11_intensity_dataframe(self):
 
 
 def _tab11_plot_intensity(self):
+    if getattr(self,"_tab11_2d_switching",False):return
+    if _ii2d_enabled(self,11) or _ii2d_axis_requested(self,11):return _ii2d_plot(self,11)
     if not hasattr(self, 'tab11_ax_intensity'):
         return
     ax, right, top = self.tab11_ax_intensity, self._tab11_ii_y2_ax, self._tab11_ii_field_ax
@@ -37675,6 +39754,7 @@ def _tab11_plot_intensity(self):
 
 
 def _tab11_clear_intensity(self):
+    _ii2d_clear(self,11)
     job = getattr(self, '_tab11_ii_recalculate_job', None)
     if job:
         self.root.after_cancel(job)
@@ -37704,6 +39784,7 @@ def _tab11_recalculate_intensity(self):
 
 
 def _tab11_intensity_settings_changed(self, *args):
+    if _ii2d_enabled(self,11):return _ii2d_settings_changed(self,11)
     if getattr(self, '_tab1_factory_resetting', False) or not self._tab11_intensity_profiles:
         return
     self._tab11_ii_dirty = True
@@ -37770,6 +39851,7 @@ def _tab11_install_intensity(self, settings, inner, before, page):
 
 @_auto_open_export
 def _tab11_export_intensity_csv(self, path=None):
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11,path=path)
     _tab11_sync_intensity(self)
     source = _tab11_intensity_dataframe(self)
     if source.empty:
@@ -37788,6 +39870,7 @@ def _tab11_export_intensity_csv(self, path=None):
 
 @_auto_open_export
 def _tab11_export_table_bundle(self):
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11)
     _tab11_sync_intensity(self)
     source = _tab11_intensity_dataframe(self)
     if source.empty:
@@ -37939,6 +40022,7 @@ def _tab10_zero_result(self, frame, crop, center):
         if not self.tab10_zero_if_undetected_var.get():
             for key in ('amplitude','sigma','fwhm','diameter_nm','core_intensity'):
                 result[key] = np.nan
+    result.update(_intensity_provenance(self, int(frame)))
     _tab10_update_integrated_result(self, result)
     _tab10_cache_intensity_profile(self, result)
     if self._tab10_ii_scope == 'tracking':
@@ -38102,6 +40186,7 @@ def _tab10_cache_intensity_profile(self, result):
 
 
 def _tab10_sync_intensity_values(self):
+    if _ii2d_enabled(self,10):return _ii2d_sync(self,10)
     enabled = bool(self.tab10_integrated_intensity_var.get())
     profiles = self._tab10_intensity_profiles
     for result in profiles.values():
@@ -38153,6 +40238,8 @@ def _tab10_sync_intensity_values(self):
 
 
 def _tab10_plot_intensity(self):
+    if getattr(self,"_tab10_2d_switching",False):return
+    if _ii2d_enabled(self,10) or _ii2d_axis_requested(self,10):return _ii2d_plot(self,10)
     if not hasattr(self, 'tab10_ax_intensity'):
         return
     ax, right, top = self.tab10_ax_intensity, self._tab10_ii_y2_ax, self._tab10_ii_field_ax
@@ -38244,6 +40331,7 @@ def _tab10_intensity_toggled(self):
 
 
 def _tab10_clear_intensity_source(self):
+    _ii2d_clear(self,10)
     _analysis_progress_update(self, 10, 0)
     job = getattr(self, '_tab10_ii_recalculate_job', None)
     if job:
@@ -38260,6 +40348,7 @@ def _tab10_clear_intensity_source(self):
 
 
 def _tab10_intensity_settings_changed(self, *args):
+    if _ii2d_enabled(self,10):return _ii2d_settings_changed(self,10)
     if (getattr(self, '_tab1_factory_resetting', False)
             or not self._tab10_intensity_profiles):
         return
@@ -38857,7 +40946,7 @@ def _tab11_primary_processed_image(self, idx):
             return None
 
     try:
-        image = np.asarray(_proc_image(self, int(idx)), dtype=np.float32)
+        image = np.asarray(_proc_image(self, int(idx)), dtype=_intensity_dtype(self))
         view = str(getattr(self, 'view_var').get() or 'Image')
 
         if view == 'Image':
@@ -38880,7 +40969,7 @@ def _tab11_primary_processed_image(self, idx):
                 0.0
             )
 
-        return np.asarray(display, dtype=np.float32)
+        return np.asarray(display, dtype=_intensity_dtype(self))
 
     except Exception as exc:
         try:
@@ -38891,6 +40980,7 @@ def _tab11_primary_processed_image(self, idx):
         except Exception:
             pass
         return None
+
 
 
 def _tab11_fetch_primary(self, preserve_frame=True):
@@ -38955,7 +41045,7 @@ def _tab11_fetch_primary(self, preserve_frame=True):
             return False
         frames.append(arr)
 
-    self._tab11_primary_stack = np.asarray(frames, dtype=np.float32)
+    self._tab11_primary_stack = np.asarray(frames, dtype=_intensity_dtype(self))
     self._tab11_scale_nm = (float(sx), float(sy))
     self._tab11_primary_ready = True
 
@@ -39000,6 +41090,7 @@ def _tab11_fetch_primary(self, preserve_frame=True):
     )
     self._tab11_render( old_idx)
     return True
+
 
 
 def _tab11_selected_roi_index(self):
@@ -39148,6 +41239,7 @@ def _tab11_auto_center_selected_roi(self):
     is translated.  This is intentionally per-ROI: choose ROI 1/2/3... from
     the ROI dropdown and click AUTO CENTER ROI for that ROI.
     """
+    if _ii2d_enabled(self,11):return _ii2d_run(self,11)
     rois = getattr(self, '_tab11_rois', [])
     if not rois:
         try:
@@ -39773,6 +41865,7 @@ def _tab11_fit_roi(self, roi_idx, frame_idx, store=True, dynamic_center=False):
     result['analysis_position_min_nm'] = float(np.min(t_nm))
     result['analysis_position_max_nm'] = float(np.max(t_nm))
     result['gaussian_covariance'] = np.asarray(fit['covariance'], float).copy()
+    result.update(_intensity_provenance(self, int(frame_idx)))
     _tab11_update_integrated_result(self, result)
     _tab11_cache_intensity(self, result)
     last = getattr(self, '_tab11_last_fit', None)
@@ -40133,6 +42226,7 @@ def _tab11_export_multi_fit_info(self):
 
 
 def _tab11_render(self, idx=None):
+    if _ii2d_enabled(self,11):return _ii2d_render_safe(self,11,idx)
     if not getattr(self, '_tab11_primary_ready', False):
         return
 
@@ -40147,6 +42241,8 @@ def _tab11_render(self, idx=None):
     ext = (0.0, w*sx, 0.0, h*sy)
     self._tab11_primary_extent = ext
 
+    _tab11_limits = _intensity_limits(self, idx, True)
+
     # ---------- Row 1 / Col 1: processed Primary ROI1 ----------
     self.tab11_ax_primary.clear()
     # Pull the live Tab-6 colormap each time the frame is rendered.
@@ -40157,7 +42253,7 @@ def _tab11_render(self, idx=None):
 
     im = self.tab11_ax_primary.imshow(
         image, cmap=self._tab11_cmap, origin='lower',
-        extent=ext, vmin=0.0, vmax=1.0,
+        extent=ext, vmin=_tab11_limits[0], vmax=_tab11_limits[1],
         interpolation='nearest', aspect='equal'
     )
     self.tab11_ax_primary.set_title(
@@ -40172,16 +42268,7 @@ def _tab11_render(self, idx=None):
     self.tab11_ax_primary.set_aspect('equal', adjustable='box')
     self.tab11_ax_primary.grid(alpha=0.10)
 
-    try:
-        if getattr(self, '_tab11_cbar', None) is None or self._tab11_cbar.ax not in self.tab11_fig.axes:
-            self._tab11_cbar = self.tab11_fig.colorbar(
-                im, ax=self.tab11_ax_primary, fraction=0.046, pad=0.04
-            )
-        else:
-            self._tab11_cbar.update_normal(im)
-        self._tab11_cbar.set_label('Intensity')
-    except Exception:
-        pass
+    _tab11_bind_colorbar(self, im)
 
     palette = ['red', 'lime', 'cyan', 'magenta', 'orange', 'yellow', 'white', 'purple']
     for ridx, c in enumerate(getattr(self, '_tab11_rois', [])):
@@ -40212,7 +42299,7 @@ def _tab11_render(self, idx=None):
     if crop is None:
         self.tab11_ax_selected.imshow(
             np.zeros((10, 10)), cmap=self._tab11_cmap, origin='lower',
-            extent=(0, 10, 0, 10), vmin=self._tab11_clim[0], vmax=self._tab11_clim[1],
+            extent=(0, 10, 0, 10), vmin=_tab11_limits[0], vmax=_tab11_limits[1],
             interpolation='nearest', aspect='equal'
         )
         self.tab11_ax_selected.set_title('SELECTED ROI — none', pad=9)
@@ -40223,7 +42310,7 @@ def _tab11_render(self, idx=None):
         self.tab11_ax_selected.imshow(
             crop, cmap=self._tab11_cmap, origin='lower',
             extent=(0, roi_w*sx, 0, roi_h*sy),
-            vmin=0.0, vmax=1.0,
+            vmin=_tab11_limits[0], vmax=_tab11_limits[1],
             interpolation='nearest', aspect='equal'
         )
         self.tab11_ax_selected.set_title(
@@ -40316,6 +42403,7 @@ def _tab11_draw_current_fit_views(self, result):
 
     ax = self.tab11_ax_fit
     ax.clear()
+    _ii2d_prepare_line_axis(ax)
     t = np.asarray(result['t_nm'], float)
     avg = np.asarray(result['average_profile'], float)
 
@@ -40449,6 +42537,7 @@ def _tab11_draw_current_fit_views(self, result):
     self.tab11_canvas.draw_idle()
 
 def _tab11_fit_current(self):
+    if _ii2d_enabled(self,11):return _ii2d_run(self,11)
     if self._tab11_ii_busy:
         return
     job = self._tab11_ii_recalculate_job
@@ -40567,6 +42656,7 @@ def _tab11_recalculate_center_selected(self):
 
 
 def _tab11_fix_all_centers(self):
+    if _ii2d_enabled(self,11):return _ii2d_run(self,11)
     if not getattr(self, '_tab11_primary_ready', False):
         if not _tab11_fetch_primary(self, preserve_frame=True):
             return
@@ -40611,6 +42701,7 @@ def _tab11_roi_selection_changed(self, event=None):
 
 
 def _tab11_frame_changed(self, value=None):
+    if _ii2d_enabled(self,11):return _ii2d_frame_changed(self,11,value)
     if getattr(self, '_tab11_programmatic', False):
         return
     if not getattr(self, '_tab11_primary_ready', False):
@@ -40931,6 +43022,7 @@ def _tab11_detect_particle_for_tracking(self, crop, roi_idx):
 
 
 def _tab11_track_all(self):
+    if _ii2d_enabled(self,11):return _ii2d_run(self,11,tracking=True)
     if self._tab11_ii_busy:
         return
     job = self._tab11_ii_recalculate_job
@@ -41165,6 +43257,7 @@ def _tab11_track_all(self):
 @_auto_open_export
 def _tab11_export_current_csv(self):
     """Export only the currently selected ROI profile/average/Gaussian fit."""
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11,current=True)
     result = getattr(self, '_tab11_last_fit', None)
     if not isinstance(result, dict):
         messagebox.showwarning(
@@ -41232,6 +43325,7 @@ def _tab11_export_current_csv(self):
 @_auto_open_export
 def _tab11_export_tracking_csv(self):
     """Export both Gaussian and D-Fit data represented by Figure 5."""
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11)
     df=getattr(self,'_tab11_tracking_df',None)
     if df is None or not isinstance(df,pd.DataFrame) or df.empty:
         messagebox.showwarning('Tab 11 Export','Figure 5 has no tracking data. Run FIT AND TRACK ALL SELECTED ROIs first.',parent=self.root); return
@@ -41259,6 +43353,7 @@ def _tab11_export_tracking_csv(self):
 @_auto_open_export
 def _tab11_export_figures(self):
     """Export each Tab-11 figure panel separately as 300-PPI PNG."""
+    if _ii2d_enabled(self,11):return _ii2d_export_figures(self,11)
     if getattr(self, 'tab11_fig', None) is None:
         return
 
@@ -41360,6 +43455,7 @@ def _tab11_export_figures(self):
 @_auto_open_export
 def _tab11_export_selected_roi_data(self):
     """Export all stored data points currently represented by Figure 4."""
+    if _ii2d_enabled(self,11):return _ii2d_export_tables(self,11,current=True)
     df = getattr(self, '_tab11_current_tracking_df', None)
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         messagebox.showwarning(
@@ -44530,11 +46626,11 @@ def _tab9_final_fetch_processed_roi_from_tab6(self, preserve_frame=True):
     try:
         frames = []
         for i in range(n):
-            arr = np.asarray(proc_fn(self, i), dtype=np.float32)
+            arr = np.asarray(proc_fn(self, i), dtype=_intensity_dtype(self))
             if arr.ndim != 2 or arr.shape != (h, w):
                 raise RuntimeError(f'Processed frame {i+1}/{n}: got {arr.shape}, expected {(h, w)}')
             frames.append(arr)
-        processed = np.stack(frames, axis=0).astype(np.float32, copy=True)
+        processed = np.stack(frames, axis=0).astype(_intensity_dtype(self), copy=True)
     except Exception as exc:
         self._tab9_roi1_ready = False
         disable_controls()
@@ -44627,6 +46723,7 @@ def _tab9_final_fetch_processed_roi_from_tab6(self, preserve_frame=True):
     status(f'✓ PROCESSED PRIMARY ROI1 FETCHED FROM TAB 6 | Frames={n} | Size={w} × {h} px | FOV={w*sx:.6g} × {h*sy:.6g} nm | Frame={old_idx+1}/{n}')
     return True
 
+
 # Only replace Tab-9's fetch entry point and its visible button callback.
 CDIWorkflowApp._tab9_roi4_fetch_from_tab6 = _tab9_final_fetch_processed_roi_from_tab6
 CDIWorkflowApp._tab9_roi4_refresh = lambda self, preserve_frame=True: _tab9_final_fetch_processed_roi_from_tab6(self, preserve_frame=preserve_frame)
@@ -44706,7 +46803,11 @@ def _t7_threshold_state(self):
         threshold = 0.50
     if not np.isfinite(threshold):
         threshold = 0.50
-    return enabled, float(np.clip(threshold, 0.0, 1.0))
+    fraction = float(np.clip(threshold, 0., 1.))
+    if _intensity_raw(self):
+        lo, hi = _intensity_limits(self, _intensity_default_frame(self, 'line'))
+        return enabled, float(lo + fraction*(hi-lo))
+    return enabled, fraction
 
 
 def _t7_threshold_crossings(self, line_idx, threshold=None):
@@ -45436,7 +47537,7 @@ def _tab6_v8_build_exact_processed_primary_stack(self):
     base_processed = _TAB6_V8_ORIGINAL_STACK_BUILDER(self)
     if base_processed is None:
         return None
-    base_processed = np.asarray(base_processed, dtype=np.float32)
+    base_processed = np.asarray(base_processed, dtype=_intensity_dtype(self))
 
     locked = bool(getattr(self, '_tab6_analysis_rotation_committed', False))
     angle = float(getattr(self, '_tab6_analysis_rotation_angle', 0.0)) if locked else 0.0
@@ -45456,11 +47557,12 @@ def _tab6_v8_build_exact_processed_primary_stack(self):
         frames = []
         for frame in base_processed:
             frames.append(_tab6_v8_rotate_for_analysis(self, frame, angle=angle, order=1))
-        result = np.stack(frames, axis=0).astype(np.float32, copy=False)
+        result = np.stack(frames, axis=0).astype(_intensity_dtype(self), copy=False)
 
     self._tab6_v8_finalized_primary_stack = result
     self._tab6_v8_finalized_stack_signature = sig
     return result
+
 
 CDIWorkflowApp._tab6_build_exact_processed_primary_stack = _tab6_v8_build_exact_processed_primary_stack
 globals()['_tab6_build_exact_processed_primary_stack'] = _tab6_v8_build_exact_processed_primary_stack
@@ -46692,7 +48794,7 @@ def _tab6_confirm_secondary_roi_rebuilt_v6(self):
                 pass
 
         # The Tab-6 processed image is the authoritative ROI2 coordinate space.
-        source0 = np.asarray(self._roi2_source_image(idx), dtype=np.float32)
+        source0 = np.asarray(self._roi2_source_image(idx), dtype=_intensity_dtype(self))
         source0 = np.squeeze(source0)
         if source0.ndim != 2:
             raise ValueError(f'Processed ROI image must be 2-D; received shape {source0.shape}.')
@@ -46718,16 +48820,16 @@ def _tab6_confirm_secondary_roi_rebuilt_v6(self):
 
         local_mask = mask[y0:y1 + 1, x0:x1 + 1]
         stack = np.empty(
-            (len(recons), y1 - y0 + 1, x1 - x0 + 1), dtype=np.float32
+            (len(recons), y1 - y0 + 1, x1 - x0 + 1), dtype=_intensity_dtype(self)
         )
         for i in range(len(recons)):
-            img = np.asarray(self._roi2_source_image(i), dtype=np.float32)
+            img = np.asarray(self._roi2_source_image(i), dtype=_intensity_dtype(self))
             img = np.squeeze(img)
             if img.ndim != 2 or img.shape[0] != h or img.shape[1] != w:
                 raise ValueError(
                     f'Processed frame {i + 1} has inconsistent shape {img.shape}; expected {(h, w)}.'
                 )
-            crop = np.array(img[y0:y1 + 1, x0:x1 + 1], dtype=np.float32, copy=True)
+            crop = np.array(img[y0:y1 + 1, x0:x1 + 1], dtype=_intensity_dtype(self), copy=True)
             crop[~local_mask] = 0.0
             stack[i] = crop
 
@@ -46815,6 +48917,7 @@ def _tab6_confirm_secondary_roi_rebuilt_v6(self):
             parent=self.root
         )
         return False
+
 
 def _v6_find_button(root_widget, exact_text):
     try:
@@ -48768,7 +50871,7 @@ def _tab6_apply_rotation_to_display(self, reset_zoom=False):
         x0, y0, x1, y1 = 0, 0, rotated.shape[1], rotated.shape[0]
         cropped = rotated
     if base_processed is not None:
-        rp = self._tab6_rotate_array(base_processed, angle, order=1).astype(np.float32)
+        rp = self._tab6_rotate_array(base_processed, angle, order=1).astype(_intensity_dtype(self))
         self.current_processed = rp[y0:y1, x0:x1].copy()
     else:
         self.current_processed = None
@@ -48807,6 +50910,7 @@ def _tab6_apply_rotation_to_display(self, reset_zoom=False):
         except Exception: pass
         self._proc_secondary_patch=None
     if canvas is not None: canvas.draw_idle()
+
 
 def _tab6_rotation_refresh(self, reset_zoom=False):
     try:
@@ -48972,9 +51076,10 @@ def _tab6_rotation_roi2_source_image(self, idx):
             # Leave the original mask untouched while obtaining the source.
             pass
         img = _TAB6_ROTATION_ORIGINAL_ROI2_SOURCE(self, idx)
-        return self._tab6_rotate_array(img, order=1).astype(np.float32)
+        return self._tab6_rotate_array(img, order=1).astype(_intensity_dtype(self))
     finally:
         pass
+
 
 CDIWorkflowApp._roi2_source_image = _tab6_rotation_roi2_source_image
 
@@ -49348,7 +51453,7 @@ def _tab6_final_apply_rotation(self, reset_zoom=True):
     base_processed = getattr(self, '_tab6_base_current_processed', None)
     if base_processed is not None:
         try:
-            rp = _tab6_final_rotate_array(self, base_processed, angle, order=1).astype(np.float32)
+            rp = _tab6_final_rotate_array(self, base_processed, angle, order=1).astype(_intensity_dtype(self))
             self.current_processed = rp[y0:y1, x0:x1].copy()
         except Exception:
             pass
@@ -49416,6 +51521,7 @@ def _tab6_final_apply_rotation(self, reset_zoom=True):
             canvas.draw_idle()
     except Exception:
         pass
+
 
 
 def _tab6_final_angle_changed(self, *_args):
@@ -49834,7 +51940,8 @@ def _tab6_v8_rotate_for_analysis(self, image, angle=None, order=1):
     if abs(angle) < 1e-12:
         return arr.copy()
     # scipy.ndimage.rotate uses positive angles counter-clockwise.
-    return _tab6_final_rotate_array(self, arr, angle=angle, order=order).astype(np.float32)
+    return _tab6_final_rotate_array(self, arr, angle=angle, order=order).astype(_intensity_dtype(self))
+
 
 
 def _tab6_v8_rotate_mask_for_analysis(self, mask, angle=None):
@@ -49849,8 +51956,9 @@ def _tab6_v8_rotate_mask_for_analysis(self, mask, angle=None):
         angle = 0.0
     if abs(angle) < 1e-12:
         return m.copy()
-    rm = _tab6_final_rotate_array(self, m.astype(np.float32), angle=angle, order=0)
+    rm = _tab6_final_rotate_array(self, m.astype(_intensity_dtype(self)), angle=angle, order=0)
     return np.asarray(rm > 0.5, dtype=bool)
+
 
 
 def _tab6_v8_capture_finalized_handoff(self):
@@ -50364,7 +52472,7 @@ if _TAB6_V13_DISPLAY_APPLY_BASE is not None:
             rmask = None
             if mask is not None:
                 rmask = _tab6_final_rotate_array(
-                    self, np.asarray(mask, dtype=np.float32), angle=angle, order=0
+                    self, np.asarray(mask, dtype=_intensity_dtype(self)), angle=angle, order=0
                 ) > 0.5
             bbox = _tab6_final_active_bbox(self, rotated, rmask)
             self._tab6_display_crop_bbox = tuple(int(v) for v in bbox)
@@ -50375,6 +52483,7 @@ if _TAB6_V13_DISPLAY_APPLY_BASE is not None:
         except Exception:
             pass
         return result
+
 
     _tab6_signed_display_apply = _tab6_v13_display_apply
     _tab6_final_apply_rotation = _tab6_v13_display_apply
@@ -50440,11 +52549,11 @@ except Exception:
 
 if callable(_TAB6_V13_ORIGINAL_ROI2_SOURCE):
     def _tab6_v13_roi2_source_image(self, idx):
-        base = np.asarray(_TAB6_V13_ORIGINAL_ROI2_SOURCE(self, idx), dtype=np.float32)
+        base = np.asarray(_TAB6_V13_ORIGINAL_ROI2_SOURCE(self, idx), dtype=_intensity_dtype(self))
         if not getattr(self, '_tab6_analysis_rotation_committed', False):
             return base
         angle = float(getattr(self, '_tab6_analysis_rotation_angle', 0.0))
-        rotated = _tab6_final_rotate_array(self, base, angle=angle, order=1).astype(np.float32)
+        rotated = _tab6_final_rotate_array(self, base, angle=angle, order=1).astype(_intensity_dtype(self))
         bbox = getattr(self, '_tab6_analysis_display_bbox', None)
         if bbox is None:
             # Safety fallback: use the current frame's exact Tab-6 edge.
@@ -50452,10 +52561,11 @@ if callable(_TAB6_V13_ORIGINAL_ROI2_SOURCE):
             bm = getattr(self, '_tab6_base_mask', None)
             if bm is not None:
                 rmask = _tab6_final_rotate_array(
-                    self, np.asarray(bm, dtype=np.float32), angle=angle, order=0
+                    self, np.asarray(bm, dtype=_intensity_dtype(self)), angle=angle, order=0
                 ) > 0.5
             bbox = _tab6_final_active_bbox(self, rotated, rmask)
-        return _tab6_v13_crop_fixed(self, rotated, bbox, fill=0.0).astype(np.float32)
+        return _tab6_v13_crop_fixed(self, rotated, bbox, fill=0.0).astype(_intensity_dtype(self))
+
 
     CDIWorkflowApp._roi2_source_image = _tab6_v13_roi2_source_image
 
@@ -50515,10 +52625,10 @@ if _TAB6_V13_CONFIRM_ROI2_BASE is not None:
         self.roi2_mask = mask
         self.roi2_coords = {'xmin': x0, 'xmax': x1, 'ymin': y0, 'ymax': y1}
         self.roi2_confirmed_coords = dict(self.roi2_coords)
-        self.roi2_stack = np.zeros((len(self.recons), y1-y0+1, x1-x0+1), dtype=np.float32)
+        self.roi2_stack = np.zeros((len(self.recons), y1-y0+1, x1-x0+1), dtype=_intensity_dtype(self))
         local_mask = mask[y0:y1+1, x0:x1+1]
         for i in range(len(self.recons)):
-            img = np.asarray(self._roi2_source_image(i), dtype=np.float32)
+            img = np.asarray(self._roi2_source_image(i), dtype=_intensity_dtype(self))
             crop = img[y0:y1+1, x0:x1+1].copy()
             crop[~local_mask] = 0.0
             self.roi2_stack[i] = crop
@@ -50538,6 +52648,7 @@ if _TAB6_V13_CONFIRM_ROI2_BASE is not None:
                 sync()
         except Exception:
             pass
+
     CDIWorkflowApp.confirm_roi2 = _tab6_v13_confirm_roi2
 
 # Rebuild any exact primary stack request using the same frozen SET-frame crop.
@@ -50546,7 +52657,7 @@ def _tab6_v13_build_primary_stack(self):
         base_builder = globals().get('_TAB6_V8_ORIGINAL_STACK_BUILDER', None)
         if not callable(base_builder):
             return None
-        base_stack = np.asarray(base_builder(self), dtype=np.float32)
+        base_stack = np.asarray(base_builder(self), dtype=_intensity_dtype(self))
     except Exception:
         return None
     if not getattr(self, '_tab6_analysis_rotation_committed', False):
@@ -50557,12 +52668,13 @@ def _tab6_v13_build_primary_stack(self):
         return base_stack.copy()
     frames = []
     for frame in base_stack:
-        rot = _tab6_final_rotate_array(self, frame, angle=angle, order=1).astype(np.float32)
+        rot = _tab6_final_rotate_array(self, frame, angle=angle, order=1).astype(_intensity_dtype(self))
         frames.append(_tab6_v13_crop_fixed(self, rot, bbox, fill=0.0))
-    result = np.stack(frames, axis=0).astype(np.float32, copy=False)
+    result = np.stack(frames, axis=0).astype(_intensity_dtype(self), copy=False)
     self._tab6_signed_final_stack = result
     self._tab6_signed_stack_signature = None
     return result
+
 
 CDIWorkflowApp._tab6_build_exact_processed_primary_stack = _tab6_v13_build_primary_stack
 globals()['_tab6_build_exact_processed_primary_stack'] = _tab6_v13_build_primary_stack
@@ -50618,7 +52730,7 @@ def _tab6_signed_rotate_and_crop(self, image, mask=None, angle=None, order=1,
             m = np.asarray(mask, dtype=bool)
             if m.shape == arr.shape[:2]:
                 rotated_mask = _tab6_final_rotate_array(
-                    self, m.astype(np.float32), angle=angle, order=0
+                    self, m.astype(_intensity_dtype(self)), angle=angle, order=0
                 ) > 0.5
         except Exception:
             rotated_mask = None
@@ -50643,6 +52755,7 @@ def _tab6_signed_rotate_and_crop(self, image, mask=None, angle=None, order=1,
         cropped_mask = rotated_mask[y0:y1, x0:x1].copy()
 
     return cropped, cropped_mask, (x0, x1, y0, y1)
+
 
 
 def _tab6_signed_display_apply(self, reset_zoom=True):
@@ -50691,7 +52804,7 @@ def _tab6_signed_display_apply(self, reset_zoom=True):
                 self, p, mask=base_mask, angle=angle, order=1,
                 fixed_bbox=bbox
             )
-            self.current_processed = pcropped.astype(np.float32, copy=True)
+            self.current_processed = pcropped.astype(_intensity_dtype(self), copy=True)
         except Exception:
             pass
 
@@ -50700,7 +52813,7 @@ def _tab6_signed_display_apply(self, reset_zoom=True):
         full_rot_mask = None
         if base_mask is not None:
             full_rot_mask = _tab6_final_rotate_array(
-                self, np.asarray(base_mask, dtype=np.float32),
+                self, np.asarray(base_mask, dtype=_intensity_dtype(self)),
                 angle=angle, order=0
             ) > 0.5
         self._tab6_rotated_mask_cache = full_rot_mask
@@ -50780,6 +52893,7 @@ def _tab6_signed_display_apply(self, reset_zoom=True):
         pass
 
 
+
 def _tab6_signed_angle_changed_final(self, *_args):
     if getattr(self, '_tab6_rotation_locked', False):
         return
@@ -50840,7 +52954,7 @@ def _tab6_signed_set_final(self):
                 mask=getattr(self, '_tab6_base_mask', None),
                 angle=snapped, order=1
             )
-            self._tab6_finalized_processed = fin.astype(np.float32, copy=True)
+            self._tab6_finalized_processed = fin.astype(_intensity_dtype(self), copy=True)
             self._tab6_finalized_mask = (
                 None if fmask is None else fmask.astype(bool, copy=True)
             )
@@ -50885,6 +52999,7 @@ def _tab6_signed_set_final(self):
         )
     except Exception:
         pass
+
 
 
 def _tab6_signed_release_final(self):
@@ -50967,7 +53082,8 @@ def _tab6_signed_rotate_for_analysis_final(self, image, angle=None, order=1):
     cropped, _, _ = _tab6_signed_rotate_and_crop(
         self, arr, mask=mask, angle=angle, order=order
     )
-    return np.asarray(cropped, dtype=np.float32)
+    return np.asarray(cropped, dtype=_intensity_dtype(self))
+
 
 
 def _tab6_signed_rotate_mask_for_analysis_final(self, mask, angle=None):
@@ -50979,11 +53095,12 @@ def _tab6_signed_rotate_mask_for_analysis_final(self, mask, angle=None):
     angle = max(-180.0, min(180.0, float(angle)))
 
     # Use the same crop as the image.
-    dummy = np.zeros(m.shape, dtype=np.float32)
+    dummy = np.zeros(m.shape, dtype=_intensity_dtype(self))
     _, cmask, _ = _tab6_signed_rotate_and_crop(
         self, dummy, mask=m, angle=angle, order=1
     )
     return None if cmask is None else cmask.astype(bool)
+
 
 
 def _tab6_signed_build_primary_stack_final(self):
@@ -50992,7 +53109,7 @@ def _tab6_signed_build_primary_stack_final(self):
         base_builder = globals().get('_TAB6_V8_ORIGINAL_STACK_BUILDER', None)
         if not callable(base_builder):
             return None
-        base_stack = np.asarray(base_builder(self), dtype=np.float32)
+        base_stack = np.asarray(base_builder(self), dtype=_intensity_dtype(self))
     except Exception:
         return None
 
@@ -51022,7 +53139,7 @@ def _tab6_signed_build_primary_stack_final(self):
         if base_mask is not None:
             try:
                 first_rmask = _tab6_final_rotate_array(
-                    self, np.asarray(base_mask, dtype=np.float32),
+                    self, np.asarray(base_mask, dtype=_intensity_dtype(self)),
                     angle=angle, order=0
                 ) > 0.5
             except Exception:
@@ -51035,12 +53152,13 @@ def _tab6_signed_build_primary_stack_final(self):
                 self, frame, mask=base_mask, angle=angle, order=1,
                 fixed_bbox=bbox
             )
-            frames.append(cf.astype(np.float32, copy=False))
-        result = np.stack(frames, axis=0).astype(np.float32, copy=False)
+            frames.append(cf.astype(_intensity_dtype(self), copy=False))
+        result = np.stack(frames, axis=0).astype(_intensity_dtype(self), copy=False)
 
     self._tab6_signed_final_stack = result
     self._tab6_signed_stack_signature = sig
     return result
+
 
 
 # Replace the display implementation with the signed-angle version.
@@ -51660,7 +53778,7 @@ def _tab6_auth_build_stack_v21(self, force=False):
     try:
         base = np.asarray(
             _TAB6_AUTH_BASE_STACK_BUILDER_V21(self),
-            dtype=np.float32
+            dtype=_intensity_dtype(self)
         )
     except Exception:
         return None
@@ -51704,7 +53822,7 @@ def _tab6_auth_build_stack_v21(self, force=False):
                 first_rmask = (
                     _tab6_final_rotate_array(
                         self,
-                        base_mask.astype(np.float32),
+                        base_mask.astype(_intensity_dtype(self)),
                         angle=angle,
                         order=0
                     ) > 0.5
@@ -51725,14 +53843,15 @@ def _tab6_auth_build_stack_v21(self, force=False):
                 self, frame, angle=angle, order=1
             )
             cf = rot[y0:y1, x0:x1]
-            frames.append(np.asarray(cf, dtype=np.float32))
+            frames.append(np.asarray(cf, dtype=_intensity_dtype(self)))
 
-        result = np.stack(frames, axis=0).astype(np.float32, copy=False)
+        result = np.stack(frames, axis=0).astype(_intensity_dtype(self), copy=False)
 
     self._tab6_auth_stack_v21 = result
     self._tab6_auth_stack_signature_v21 = sig
     self._tab6_auth_bbox_v21 = bbox
     return result
+
 
 
 def _tab6_auth_display_stack_frame_v21(self, idx=None):
@@ -51792,7 +53911,7 @@ def _tab6_auth_display_stack_frame_v21(self, idx=None):
     ax.set_autoscale_on(False)
     self._proc_full_physical_extent = extent
     self._proc_display_shape = (h, w)
-    self.current_processed = np.asarray(stack[idx], dtype=np.float32).copy()
+    self.current_processed = np.asarray(stack[idx], dtype=_intensity_dtype(self)).copy()
 
     try:
         self._tab6_display_mask = None
@@ -51812,6 +53931,7 @@ def _tab6_auth_display_stack_frame_v21(self, idx=None):
     except Exception:
         pass
     return True
+
 
 
 def _tab6_auth_update_processing_view_v21(self, *args, **kwargs):
@@ -52475,11 +54595,11 @@ def _tab6_auth_confirm_v21(self, *args, **kwargs):
     roi_mask = np.zeros((h, w), dtype=bool)
     roi_mask[y0:y1 + 1, x0:x1 + 1] = local_mask
 
-    out = np.empty((n, crop_h, crop_w), dtype=np.float32)
+    out = np.empty((n, crop_h, crop_w), dtype=_intensity_dtype(self))
     for i in range(n):
         crop = np.asarray(
             stack[i, y0:y1 + 1, x0:x1 + 1],
-            dtype=np.float32
+            dtype=_intensity_dtype(self)
         ).copy()
         crop[~local_mask] = 0.0
         out[i] = crop
@@ -52550,6 +54670,7 @@ def _tab6_auth_confirm_v21(self, *args, **kwargs):
         pass
 
     return True
+
 
 
 def _tab6_auth_clear_v21(self, *args, **kwargs):
@@ -52676,7 +54797,7 @@ def _tab6_downstream_authoritative_primary_stack_v22(self):
     if stack is None:
         return None, None, None
 
-    arr = np.asarray(stack, dtype=np.float32)
+    arr = np.asarray(stack, dtype=_intensity_dtype(self))
     if arr.ndim != 3 or arr.shape[0] < 1:
         return None, None, None
 
@@ -52727,6 +54848,8 @@ def _tab6_downstream_authoritative_primary_stack_v22(self):
     version = int(getattr(self, '_tab6_analysis_rotation_version', 0))
     sig = (
         'TAB6_AUTH_PRIMARY_V22',
+        getattr(self, '_roi_normalization_signature', None),
+        getattr(self, '_tab6_exact_processed_primary_stack_signature', None),
         committed,
         round(angle, 8),
         version,
@@ -52735,6 +54858,7 @@ def _tab6_downstream_authoritative_primary_stack_v22(self):
         round(float(sy), 12),
     )
     return arr, (float(sx), float(sy)), sig
+
 
 
 def _tab9_fetch_tab6_authoritative_v22(self, preserve_frame=True):
@@ -53053,7 +55177,7 @@ def _tab9_roi4_export_primary_figure_v28(self, idx, dpi):
        getattr(self, '_tab9_roi4_coords', None) is None:
         raise RuntimeError('Confirm ROI before exporting.')
 
-    stack = np.asarray(self._tab9_roi1_stack, dtype=np.float32)
+    stack = np.asarray(self._tab9_roi1_stack, dtype=_intensity_dtype(self))
     idx = int(idx)
     image = stack[idx]
     h, w = image.shape[:2]
@@ -53068,6 +55192,7 @@ def _tab9_roi4_export_primary_figure_v28(self, idx, dpi):
     n = _tab9_roi4_frame_count(self)
 
     fig = plt.figure(figsize=(9.0, 7.2), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
     ax = fig.add_axes([0.09, 0.12, 0.76, 0.78])
     cb = fig.add_axes([0.875, 0.12, 0.035, 0.78])
 
@@ -53095,13 +55220,14 @@ def _tab9_roi4_export_primary_figure_v28(self, idx, dpi):
     return fig
 
 
+
 @_auto_open_export
 def _tab9_roi4_export_selected_figure_v28(self, idx, dpi):
     if not getattr(self, '_tab9_roi4_confirmed', False) or \
        getattr(self, '_tab9_roi4_coords', None) is None:
         raise RuntimeError('Confirm ROI before exporting.')
 
-    stack = np.asarray(self._tab9_roi1_stack, dtype=np.float32)
+    stack = np.asarray(self._tab9_roi1_stack, dtype=_intensity_dtype(self))
     idx = int(idx)
     image = stack[idx]
 
@@ -53115,6 +55241,7 @@ def _tab9_roi4_export_selected_figure_v28(self, idx, dpi):
     cmap = str(getattr(self, 'colormap_var').get() or 'gray')
 
     fig = plt.figure(figsize=(7.6, 7.2), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
     ax = fig.add_axes([0.10, 0.12, 0.73, 0.78])
     cb = fig.add_axes([0.875, 0.12, 0.035, 0.78])
 
@@ -53134,6 +55261,7 @@ def _tab9_roi4_export_selected_figure_v28(self, idx, dpi):
     )
     fig.colorbar(im, cax=cb).set_label('Intensity')
     return fig
+
 
 
 @_auto_open_export
@@ -53296,7 +55424,7 @@ def _tab6_auth_display_stack_frame_v21_scale_fixed(self, idx=None):
 
     self._proc_full_physical_extent = extent
     self._proc_display_shape = (h, w)
-    self.current_processed = np.asarray(stack[idx], dtype=np.float32).copy()
+    self.current_processed = np.asarray(stack[idx], dtype=_intensity_dtype(self)).copy()
 
     try:
         self._tab6_display_mask = None
@@ -53326,6 +55454,7 @@ def _tab6_auth_display_stack_frame_v21_scale_fixed(self, idx=None):
         pass
 
     return True
+
 
 
 # Replace the global function used by the authoritative SET/update wrappers.
@@ -53510,6 +55639,7 @@ def _t7_export_exact_visible_plot(self):
         field_text = f' | Field = {field:+.2f} mT' if field is not None else ''
 
         roi_fig = plt.figure(figsize=(8.6, 7.4), dpi=300, facecolor='white')
+        _intensity_tag_figure(self, roi_fig, _intensity_default_frame(self, 'line'))
         roi_ax = roi_fig.add_axes([0.09, 0.10, 0.77, 0.82])
         roi_cax = roi_fig.add_axes([0.89, 0.10, 0.035, 0.82])
         roi_im = roi_ax.imshow(
@@ -53695,7 +55825,7 @@ def _tab6_rebuilt_export_source(self):
             'Confirm/apply the Primary ROI resolution first.'
         )
 
-    stack = np.asarray(stack, dtype=np.float32)
+    stack = np.asarray(stack, dtype=_intensity_dtype(self))
     if stack.ndim != 3 or stack.shape[0] == 0:
         raise RuntimeError(f'Invalid authoritative Tab-6 ROI stack shape: {stack.shape}')
 
@@ -53711,9 +55841,10 @@ def _tab6_rebuilt_export_source(self):
     return stack, (sx, sy)
 
 
+
 @_auto_open_export
 def _tab6_rebuilt_export_figure(self, image, idx, scale, dpi, title_prefix='ROI'):
-    image = np.asarray(image, dtype=np.float32)
+    image = np.asarray(image, dtype=_intensity_dtype(self))
     if image.ndim != 2 or image.size == 0:
         raise RuntimeError('Invalid Tab-6 export frame.')
 
@@ -53726,6 +55857,7 @@ def _tab6_rebuilt_export_figure(self, image, idx, scale, dpi, title_prefix='ROI'
         pass
 
     fig = plt.figure(figsize=(9.0, 7.2), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
     ax = fig.add_axes([0.09, 0.12, 0.76, 0.78])
     cax = fig.add_axes([0.875, 0.12, 0.035, 0.78])
 
@@ -53755,6 +55887,7 @@ def _tab6_rebuilt_export_figure(self, image, idx, scale, dpi, title_prefix='ROI'
     ax.set_title(title, fontsize=12)
     fig.colorbar(im, cax=cax).set_label('Intensity', rotation=90)
     return fig
+
 
 
 @_auto_open_export
@@ -53948,6 +56081,7 @@ def _tab6_rebuilt_mp4(self, indices, filename):
         # Use the same Matplotlib representation for every frame.  The DATA
         # array comes directly from the same rotated stack used by Tab 9.
         fig = plt.figure(figsize=(9.0, 7.2), dpi=dpi, facecolor='white')
+        _intensity_tag_figure(self, fig, _intensity_default_frame(self, 'processing'))
         ax = fig.add_axes([0.09, 0.12, 0.76, 0.78])
         cax = fig.add_axes([0.875, 0.12, 0.035, 0.78])
         cmap_name = str(self.colormap_var.get() or 'gray')
@@ -53966,7 +56100,7 @@ def _tab6_rebuilt_mp4(self, indices, filename):
             raise RuntimeError('Could not initialize an MP4 encoder.\n\n' + '\n'.join(errors))
 
         for count, i in enumerate(indices, start=1):
-            image = np.asarray(stack[i], dtype=np.float32)
+            image = np.asarray(stack[i], dtype=_intensity_dtype(self))
             h, w = image.shape
             sx, sy = scale
             ax.clear()
@@ -54042,6 +56176,7 @@ def _tab6_rebuilt_mp4(self, indices, filename):
         'Source: exact Tab-6 Primary ROI stack used by Tab 9.',
         parent=self.root
     )
+
 
 
 def _tab6_rebuilt_single_mp4(self):
@@ -54201,11 +56336,13 @@ def _tab4_component_capture_sources(self):
         n = len(self.recons) if getattr(self, 'recons', None) is not None else 0
     except Exception:
         n = 0
-    sig = (
-        n,
-        tuple(np.asarray(getattr(self, 'complex_recons', np.empty((0,)))).shape)
-        if getattr(self, 'complex_recons', None) is not None else None,
-    )
+    complex_source = getattr(self, 'complex_recons', None)
+    sig = (n, id(complex_source), tuple(np.asarray(complex_source).shape)) if complex_source is not None else (
+        n, tuple(id(getattr(self, name, None)) for name in
+                 ('recons', 'imag_recons', 'amplitude_recons', 'phase_recons')))
+    # Committing a component may alias recons; retain the captured originals.
+    if complex_source is None and getattr(self, '_analysis_component_stack_confirmed', None) is getattr(self, 'recons', None):
+        sig = getattr(self, '_tab4_component_source_signature', sig)
     sources = getattr(self, '_tab4_component_source_stacks', None)
     if sources is not None and getattr(self, '_tab4_component_source_signature', None) == sig:
         return sources
@@ -54213,10 +56350,10 @@ def _tab4_component_capture_sources(self):
     complex_stack = getattr(self, 'complex_recons', None)
     sources = {}
     try:
-        if getattr(self, 'real_recons', None) is not None and np.asarray(self.real_recons).ndim == 3:
-            sources['Real'] = np.asarray(self.real_recons, dtype=np.float64).copy()
-        elif complex_stack is not None:
+        if complex_stack is not None:
             sources['Real'] = np.real(complex_stack).astype(np.float64)
+        elif getattr(self, 'real_recons', None) is not None and np.asarray(self.real_recons).ndim == 3:
+            sources['Real'] = np.asarray(self.real_recons, dtype=np.float64).copy()
         elif getattr(self, 'recons', None) is not None:
             sources['Real'] = np.asarray(self.recons, dtype=np.float64).copy()
     except Exception:
@@ -54448,6 +56585,20 @@ def _tab4_install_controls(self):
             except Exception:
                 pass
 
+        if not hasattr(self, 'tab4_normalized_intensity_var'):
+            self._analysis_intensity_mode = 'Normalized'
+            self.tab4_normalized_intensity_var = tk.BooleanVar(value=True)
+            self.tab4_raw_intensity_var = tk.BooleanVar(value=False)
+        mode_row = ttk.Frame(self.tab_roi, padding=(8, 2))
+        mode_row.pack(fill='x', after=top)
+        self.tab4_normalized_intensity_check = ttk.Checkbutton(mode_row, text='Normalized Intensity',
+            variable=self.tab4_normalized_intensity_var, command=lambda: _tab4_set_intensity_mode(self, 'Normalized'))
+        self.tab4_normalized_intensity_check.pack(side='left', padx=(0, 12))
+        self.tab4_raw_intensity_check = ttk.Checkbutton(mode_row, text='Raw Intensity',
+            variable=self.tab4_raw_intensity_var, command=lambda: _tab4_set_intensity_mode(self, 'Raw'))
+        self.tab4_raw_intensity_check.pack(side='left')
+        ttk.Label(mode_row, text='Raw: original component units; brightness/contrast affect display only. Spatial filters and resizing still apply.').pack(side='left', padx=14)
+
         ttk.Label(top, text='Component').pack(side='left', padx=(0, 2))
         combo = ttk.Combobox(top, textvariable=self.tab4_component_var, values=list(_TAB4_COMPONENT_CHOICES), state='readonly', width=12)
         combo.pack(side='left', padx=(0, 5))
@@ -54484,16 +56635,31 @@ def _tab4_install_controls(self):
 
         hist_row = ttk.Frame(self.tab_roi, padding=(8, 0, 8, 2))
         try:
-            hist_row.pack(fill='x', after=top)
+            hist_row.pack(fill='x', after=mode_row)
         except Exception:
             hist_row.pack(fill='x')
         ttk.Checkbutton(hist_row, text='Histogram analysis', variable=self.tab4_histogram_var, command=lambda: self.refresh_roi_image()).pack(side='left')
         ttk.Label(hist_row, textvariable=self.tab4_histogram_status_var).pack(side='left', padx=(8, 0))
         self.tab4_histogram_row = hist_row
+        reference_row = ttk.LabelFrame(self.tab_roi, text='Dataset normalization references — source frame numbers start at 0', padding=(6, 3))
+        reference_row.pack(fill='x', after=hist_row, padx=8, pady=(2, 3))
+        columns = ('dataset', 'component', 'minimum', 'minimum_frame', 'maximum', 'maximum_frame')
+        table = ttk.Treeview(reference_row, columns=columns, show='headings', height=1, selectmode='browse')
+        for column, title, width in zip(columns,
+                ('Dataset / sweep', 'Component', 'Minimum → 0', 'Source frame', 'Maximum → 1', 'Source frame'),
+                (220, 95, 150, 100, 150, 100)):
+            table.heading(column, text=title)
+            table.column(column, width=width, minwidth=70, anchor='w' if column in ('dataset', 'component') else 'center')
+        table.pack(fill='x')
+        self.tab4_normalization_reference_table = table
+        self._tab4_normalization_table_signature = None
+        self.tab4_normalization_status_var = tk.StringVar(value='Confirm a component to find each dataset’s fixed minimum and maximum across all loaded frames.')
+        ttk.Label(reference_row, textvariable=self.tab4_normalization_status_var, wraplength=1100).pack(fill='x', pady=(3, 0))
+        self.tab4_normalization_reference_row = reference_row
 
         slider_row = ttk.Frame(self.tab_roi, padding=(8, 0, 8, 4))
         try:
-            slider_row.pack(fill='x', after=hist_row)
+            slider_row.pack(fill='x', after=reference_row)
         except Exception:
             slider_row.pack(fill='x')
         ttk.Label(slider_row, text='Frame').pack(side='left')
@@ -54519,15 +56685,8 @@ def _tab4_component_display_image(self, idx):
     if support.shape != img.shape:
         support = np.ones(img.shape, dtype=bool)
     valid = support & np.isfinite(img)
-    if np.any(valid):
-        lo, hi = np.percentile(img[valid], (2, 98))
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo, hi = float(np.nanmin(img[valid])), float(np.nanmax(img[valid]))
-            if hi <= lo:
-                hi = lo + 1e-12
-    else:
-        lo, hi = 0.0, 1.0
-    disp = np.clip((img - lo) / (hi - lo), 0.0, 1.0)
+    reference = _update_component_normalization_status(self, idx)
+    disp = img.copy() if _intensity_raw(self) else _normalize_component_frame_values(img, reference)
     disp[~support] = np.nan
     return img, disp, support, valid
 
@@ -54767,8 +56926,8 @@ def _tab4_component_refresh_roi_image(self, *args, **kwargs):
     self._roi_ax = ax_roi
     if hist_enabled:
         if centers.size:
-            ax_hist.plot(centers, counts, color='0.15', linewidth=1.8)
-            ax_hist.fill_between(centers, counts, color='0.65', alpha=.25)
+            ax_hist.plot(centers, counts, color='blue', linewidth=1.8)
+            ax_hist.fill_between(centers, counts, color='skyblue', alpha=.25)
         ax_hist.set_title('Confirmed ROI histogram' if _tab4_has_confirmed_roi(self) else 'Support histogram')
         ax_hist.set_xlabel(f'{comp} intensity')
         ax_hist.set_ylabel('Count')
@@ -54913,7 +57072,9 @@ def _tab1_reset_loaded_state(self):
         'current_processed', 'roi2_coords', 'roi2_confirmed_coords', 'roi2_mask',
         'roi2_stack', 'line_source_stack', 'gauss2d_source_stack',
         '_analysis_component_stack_confirmed', '_tab4_component_source_stacks',
-        '_tab4_component_source_signature'
+        '_tab4_component_source_signature', '_component_frame_normalization_cache',
+        '_roi_normalization_signature', '_roi_normalization_records',
+        '_component_normalization_layout_cache', '_tab4_normalization_table_signature'
     ):
         try:
             if attr in ('hdf5_files', 'reconstruction_files', 'reconstruction_paths'):
@@ -54953,6 +57114,17 @@ def _tab1_reset_loaded_state(self):
         self.field_label_var.set('Field: --')
     except Exception:
         pass
+
+    table = getattr(self, 'tab4_normalization_reference_table', None)
+    if table is not None:
+        children = table.get_children()
+        if children:
+            table.delete(*children)
+        table.configure(height=1)
+    status = getattr(self, 'tab4_normalization_status_var', None)
+    if status is not None:
+        status.set('Load reconstructions and confirm a component to find dataset reference limits.')
+
 
 
 def _tab1_load_single_folder(self, folder, direction=None, auto_load=False):
@@ -55601,13 +57773,13 @@ def _tab6_export_exact_display_frame_v24(self, idx):
             'Tab 6 export cannot access the same authoritative ROI source used by Tab 9.'
         )
 
-    stack, scale, _sig = fetch(self, preserve_frame=True)
+    stack, scale, _sig = fetch(self)
     if stack is None:
         raise RuntimeError(
             'Tab 6 Primary ROI is unavailable. Confirm/apply the Primary ROI first.'
         )
 
-    arr = np.asarray(stack, dtype=np.float32)
+    arr = np.asarray(stack, dtype=_intensity_dtype(self))
     if arr.ndim != 3 or arr.shape[0] < 1:
         raise RuntimeError('Invalid Tab 6 authoritative ROI stack.')
 
@@ -55617,7 +57789,7 @@ def _tab6_export_exact_display_frame_v24(self, idx):
         idx = 0
     idx = max(0, min(idx, arr.shape[0] - 1))
 
-    image = np.asarray(arr[idx], dtype=np.float32)
+    image = np.asarray(arr[idx], dtype=_intensity_dtype(self))
     if image.ndim != 2 or image.size == 0:
         raise RuntimeError('Invalid Tab 6 authoritative ROI frame.')
 
@@ -55625,6 +57797,7 @@ def _tab6_export_exact_display_frame_v24(self, idx):
     self._tab6_export_authoritative_scale_v24 = (float(scale[0]), float(scale[1]))
     self._tab6_export_authoritative_stack_signature_v24 = _sig
     return image.copy()
+
 @_auto_open_export
 def _tab6_export_exact_display_extent_v24(self, image):
     """Return the physical extent using the SAME scale fetched by Tab 9."""
@@ -55638,7 +57811,7 @@ def _tab6_export_exact_display_extent_v24(self, image):
         fetch = globals().get('_tab6_downstream_authoritative_primary_stack_v22')
         if not callable(fetch):
             raise RuntimeError('Tab 6 authoritative ROI source is unavailable.')
-        stack, scale, _sig = fetch(self, preserve_frame=True)
+        stack, scale, _sig = fetch(self)
         if stack is None:
             raise RuntimeError('Tab 6 Primary ROI is unavailable.')
         scale = (float(scale[0]), float(scale[1]))
@@ -55666,11 +57839,14 @@ def _tab6_export_figure_v24(self, image, idx, dpi=300, title_prefix='ROI'):
         pass
 
     fig = plt.figure(figsize=(8.6, 7.2), dpi=int(dpi), facecolor='white')
+    _intensity_tag_figure(self, fig, idx)
+    fig._intensity_owner = self
+    fig._intensity_frame_index = int(idx)
     ax = fig.add_axes([0.1, 0.1, 0.76, 0.82])
     cax = fig.add_axes([0.89, 0.1, 0.035, 0.82])
 
     im = ax.imshow(
-        np.clip(image, 0.0, 1.0),
+        _intensity_display_pixels(self, image),
         cmap=cmap_name,
         origin='lower',
         interpolation='nearest',
@@ -55705,6 +57881,7 @@ def _tab6_export_figure_v24(self, image, idx, dpi=300, title_prefix='ROI'):
     cb.set_label('Intensity', rotation=90)
     fig.canvas.draw()
     return fig
+
 
 
 @_auto_open_export
@@ -55950,6 +58127,7 @@ def _tab6_mp4_export_exact_display_v24(self, indices, filename):
             dpi=dpi,
             facecolor='white'
         )
+        _intensity_tag_figure(self, fig, _intensity_default_frame(self, 'processing'))
         ax = fig.add_axes([0.1, 0.1, 0.76, 0.82])
         cax = fig.add_axes([0.89, 0.1, 0.035, 0.82])
 
@@ -55972,6 +58150,7 @@ def _tab6_mp4_export_exact_display_v24(self, indices, filename):
 
         for count, i in enumerate(indices, start=1):
             # EXACT Tab-6 displayed frame for this index.
+            _intensity_tag_figure(self, fig, i)
             image = _tab6_export_exact_display_frame_v24(self, i)
             extent = _tab6_export_exact_display_extent_v24(self, image)
 
@@ -55985,7 +58164,7 @@ def _tab6_mp4_export_exact_display_v24(self, indices, filename):
             )
 
             im = ax.imshow(
-                np.clip(image, 0.0, 1.0),
+                _intensity_display_pixels(self, image),
                 cmap=cmap_name,
                 origin='lower',
                 interpolation='nearest',
@@ -56092,6 +58271,7 @@ def _tab6_mp4_export_exact_display_v24(self, indices, filename):
         f'Exact Tab-6 displayed frames.',
         parent=self.root
     )
+
 
 
 def _tab6_single_mp4_exact_display_v24(self):
@@ -57035,7 +59215,7 @@ class DomainPeriodicityPanel:
                         mask = mask[y0:y1, x0:x1]
                 if mask.shape != stack.shape[1:]:
                     raise ValueError('Tab 6 support geometry does not match its processed Primary ROI.')
-            self.stack = np.array(stack, dtype=np.float32, copy=True)
+            self.stack = np.array(stack, dtype=_intensity_dtype(self), copy=True)
             self.support = None if mask is None else mask.copy()
             self.scale = tuple(map(float, scale))
             self.source_token = self.token()
@@ -57070,6 +59250,7 @@ class DomainPeriodicityPanel:
             self.reset()
             self.status.set(f'Primary ROI unavailable: {exc}')
             return False
+
 
     def update_auto_range(self):
         if not self.auto_range.get() or self.scale is None:
@@ -57312,6 +59493,7 @@ class DomainPeriodicityPanel:
             return None
 
     def compute(self, frame, cfg):
+        _intensity_require_scalar(self.app)
         result = domain_periodicity_measure(self.stack[frame], self.scale, self.circle, self.support, cfg)
         compact = {key: value for key, value in result.items() if key not in ('roi', 'mask', 'power', 'fx', 'fy', 'window', 'crop', 'correlation_map', 'lag_x_nm', 'lag_y_nm')}
         compact.update(frame_index=int(frame), frame=int(frame)+1,
@@ -57393,10 +59575,30 @@ class DomainPeriodicityPanel:
             self.status.set('Tracking cancelled. Completed frames retained.')
             self.draw_tracking(); self.refresh_table()
 
+    def analysis_colorbar(self, artist, axis, label):
+        cax = self._analysis_colorbar_axes[axis]
+        cax.set_visible(True)
+        return self.figure.colorbar(artist, cax=cax, label=label)
+
     def draw_analysis(self):
         from matplotlib.patches import Circle, Rectangle, Ellipse
         self.figure.clear()
-        axes = self.figure.subplots(2, 2)
+        # A shared grid keeps columns aligned without colorbars stealing panel space.
+        # Explicit margins avoid feedback between aspect-aware bar locators and constrained layout.
+        self.figure.set_layout_engine(None)
+        grid = self.figure.add_gridspec(2, 4, width_ratios=(1., .05, 1., .05))
+        self.figure._responsive_analysis_layout = lambda: _layout_domain_analysis_grid(self.figure, grid)
+        axes = np.empty((2, 2), dtype=object)
+        self._analysis_colorbar_axes = {}
+        for row in range(2):
+            for col in range(2):
+                ax = self.figure.add_subplot(grid[row, 2*col])
+                cax = self.figure.add_subplot(grid[row, 2*col+1])
+                cax.set_visible(False)
+                axes[row, col] = ax
+                ax.set_anchor('C')
+                self._analysis_colorbar_axes[ax] = cax
+        axes[1, 1].set_box_aspect(1.)
         self.primary_axis = axes[0, 0]
         self.analysis_axes = tuple(axes.ravel())
         method = self.method.get()
@@ -57419,7 +59621,9 @@ class DomainPeriodicityPanel:
         h, w = image.shape
         cmap = str(self.app.colormap_var.get() or 'RdBu_r')
         displayed = np.ma.array(image, mask=~self.support) if self.support is not None else image
-        axes[0, 0].imshow(displayed, origin='lower', cmap=cmap, extent=(0, w*sx, 0, h*sy), interpolation='nearest')
+        primary_artist = axes[0, 0].imshow(displayed, origin='lower', cmap=cmap, vmin=0., vmax=1.,
+            extent=(0, w*sx, 0, h*sy), interpolation='nearest')
+        self.analysis_colorbar(primary_artist, axes[0, 0], 'Intensity (a.u.)')
         axes[0, 0].set(xlabel='X (nm)', ylabel='Y (nm)')
         circle = self.circle or self.pending_circle
         if circle is not None:
@@ -57433,10 +59637,10 @@ class DomainPeriodicityPanel:
             if self.support is not None:
                 mask &= self.support[crop]
             masked = np.ma.array(image[crop], mask=~mask | ~np.isfinite(image[crop]))
-            artist = axes[0, 1].imshow(masked, origin='lower', cmap=cmap,
+            artist = axes[0, 1].imshow(masked, origin='lower', cmap=cmap, vmin=0., vmax=1.,
                 extent=(crop[1].start*sx, crop[1].stop*sx, crop[0].start*sy, crop[0].stop*sy), interpolation='nearest')
             axes[0, 1].set(xlabel='X (nm)', ylabel='Y (nm)')
-            self.figure.colorbar(artist, ax=axes[0, 1], label='Processed intensity (a.u.)', shrink=.8)
+            self.analysis_colorbar(artist, axes[0, 1], 'Intensity (a.u.)')
         else:
             axes[0, 1].set_axis_off()
         result = None
@@ -57462,7 +59666,7 @@ class DomainPeriodicityPanel:
                 x_bounds, y_bounds = domain_periodicity_fft_limits(result, self.peak_zoom.get())
                 axes[1, 0].set_xlim(np.asarray(x_bounds)*factor)
                 axes[1, 0].set_ylim(np.asarray(y_bounds)*factor)
-                self.figure.colorbar(im, ax=axes[1, 0], label='Relative power (dB)', shrink=.8)
+                self.analysis_colorbar(im, axes[1, 0], 'Relative power (dB)')
                 if result['valid']:
                     axes[1, 0].add_patch(Circle((0, 0), factor*result['peak_frequency_cycles_nm'], fill=False, edgecolor='cyan', linewidth=1.))
                 frequency, radial = factor*result['frequency'], result['radial_power']
@@ -57503,7 +59707,8 @@ class DomainPeriodicityPanel:
         if is_particle:
             crop = result['crop']; sx, sy = self.scale
             extent = (crop[1].start*sx, crop[1].stop*sx, crop[0].start*sy, crop[0].stop*sy)
-            ax.imshow(np.ma.array(result['roi'], mask=~result['mask']), cmap=cmap, origin='lower', extent=extent)
+            particle_artist = ax.imshow(np.ma.array(result['roi'], mask=~result['mask']), cmap=cmap, origin='lower', extent=extent, vmin=0., vmax=1.)
+            self.analysis_colorbar(particle_artist, ax, 'Intensity (a.u.)')
             centers = result['particle_centers_nm']
             if len(centers):
                 global_centers = centers+np.array([extent[0], extent[2]])
@@ -57519,7 +59724,7 @@ class DomainPeriodicityPanel:
                 lx, ly = result['lag_x_nm'], result['lag_y_nm']
                 im = ax.imshow(np.ma.masked_invalid(result['correlation_map']), origin='lower', cmap='RdBu_r', vmin=-1, vmax=1,
                     extent=(lx[0]-self.scale[0]/2, lx[-1]+self.scale[0]/2, ly[0]-self.scale[1]/2, ly[-1]+self.scale[1]/2))
-                self.figure.colorbar(im, ax=ax, label='ACF', shrink=.8)
+                self.analysis_colorbar(im, ax, 'ACF')
                 limit = result['roi_size_nm']/2
                 ax.set_xlim(-limit, limit); ax.set_ylim(-limit, limit)
             profile.set(xlabel='Displacement (nm)', ylabel='C(r)')
@@ -57554,6 +59759,7 @@ class DomainPeriodicityPanel:
             row = {key: value for key, value in source.items()
                 if key != 'settings' and not isinstance(value, (np.ndarray, tuple, list, dict))}
             row.update(field_mT=self.field(index), current_A=self.field(index, 'current_values_A'))
+            row.update(_intensity_provenance(self.app, index))
             row['domain_periodicity_nm'] = source['period_nm'] if source['measurement_kind']=='Domain periodicity' else np.nan
             row.update(source['settings'])
             rows.append(row)
@@ -57701,7 +59907,7 @@ class DomainPeriodicityPanel:
                         particle_index_in_frame=particle, x_in_roi_crop_nm=center[0], y_in_roi_crop_nm=center[1]))
             pd.DataFrame(correlations, columns=('frame_index','frame','field_mT','method','distance_nm','correlation','model','pair_count')).to_csv(folder/'correlation_profiles.csv', index=False)
             pd.DataFrame(centers, columns=('frame_index','frame','field_mT','particle_index_in_frame','x_in_roi_crop_nm','y_in_roi_crop_nm')).to_csv(folder/'particle_centers.csv', index=False)
-            metadata = dict(method=self.method.get(),
+            metadata = dict(intensity_provenance=_intensity_provenance(self.app, int(self.frame.get())), method=self.method.get(),
                 source='Processed Primary ROI from Tab 6', source_geometry=self.source_description,
                 circle_nm=list(self.circle) if self.roi_shape.get()=='Circle' and self.roi_units.get()=='nm' else None,
                 roi_geometry=domain_periodicity_roi_info(self.scale, self.circle, self.roi_shape.get(), self.roi_units.get()),
@@ -57825,6 +60031,11 @@ _tab4_sync_slider_and_range(app)
 app._pixel_cal_sync_roi_frame()
 app._tab1_capture_factory_defaults()
 
+
+_install_figure_legend_controls(app)
+_install_tab6_pip_control(app)
+_install_direct_2d_intensity(app)
+app._tab1_capture_factory_defaults()
 
 _startup_building = False
 _startup_loading_window.destroy()

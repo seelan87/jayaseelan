@@ -1,6 +1,6 @@
 # X-Ray Hologram Reconstruction — Windows 11 x64
 
-The 15-tab hologram analysis application from `finalized_fast.ipynb`, packaged
+The 15-tab hologram analysis application from `finalized_2d_analysis.ipynb`, packaged
 for 64-bit Windows. Python, Jupyter, CUDA Toolkit, and FFmpeg installations are
 not required. The notebook's scientific fitting and processed ROI workflows
 are preserved.
@@ -33,12 +33,20 @@ not included in the application or uploaded by the build workflow.
 - Imaginary-component and processed ROI analysis, including matched Tab 10/11 fits.
 - Zero-based frame sliders with midpoint initial positions.
 - Home, Back/Forward, Pan, Zoom, subplot settings, Save, and MP4 export.
+- Raw and normalized selected-component intensity modes, with matching colorbar scales.
+- Direct 2D signed full-ROI intensity, local-background subtraction, central-core RMS
+  diameter, and minimum outer circularity filtering in Tabs 10 and 11.
+- Cached per-frame figures after tracking: slider labels update immediately;
+  dragging performs no calculation and release displays the stored result.
+- Restored 1D Gaussian/residual plots after leaving 2D mode, combined 1D/2D
+  plot-axis menus, Show Legends controls, and Tab 6 FFT/IFFT picture-in-picture.
 
 ## Build using GitHub Actions
 
 Run **Build X-Ray Hologram Windows x64** from the repository's Actions page.
 It uses Windows and Python 3.12 x64, installs pinned dependencies, tests the
-source app, builds both formats, and tests each packaged executable. The
+source app, builds both formats, and tests each packaged executable, including
+the 2D shape filter and calculation-free slider browsing. The
 `XRay-Hologram-Windows-x64` artifact contains both downloads, checksums, source
 provenance, and self-test reports. No release or existing application is replaced.
 
