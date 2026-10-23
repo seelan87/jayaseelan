@@ -34,6 +34,7 @@ not included in the application or uploaded by the build workflow.
 - Zero-based frame sliders with midpoint initial positions.
 - Home, Back/Forward, Pan, Zoom, subplot settings, Save, and MP4 export.
 - Raw and normalized selected-component intensity modes, with matching colorbar scales.
+- Tab 6 starts and resets with Filter **None**; other filters are available on demand.
 - Direct 2D signed full-ROI intensity, local-background subtraction, central-core RMS
   diameter, and minimum outer circularity filtering in Tabs 10 and 11.
 - Cached per-frame figures after tracking: slider labels update immediately;

@@ -39,6 +39,7 @@ def run_self_test(report_path):
         check(app.tab10_fix_center_button.cget('text')=='FIX CENTER','Tab 10 Fix Center control exists')
         check(app.magnet_fix_button.cget('text')=='Fix','Calibration Fix control exists')
         check(float(app.tab10_slider.cget('from'))==0,'Frame sliders use zero-based indexing')
+        check(app.filter_var.get()=='None','Tab 6 starts with Filter None')
         for tab in app.nb.tabs():
             app.nb.select(tab);root.update()
         for tab,notebook in ((app.tab_single_roi10,app.tab10_plot_views),

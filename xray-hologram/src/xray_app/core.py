@@ -3146,7 +3146,7 @@ class CDIWorkflowApp:
         if not hasattr(self, 'contrast_var'):
             self.contrast_var = tk.DoubleVar(value=1.0)
         if not hasattr(self, 'filter_var'):
-            self.filter_var = tk.StringVar(value='Gaussian')
+            self.filter_var = tk.StringVar(value='None')
         if not hasattr(self, 'strength_var'):
             self.strength_var = tk.DoubleVar(value=3.0)
         if not hasattr(self, 'colormap_var'):
@@ -8028,7 +8028,7 @@ def _proc_build(self):
     self.proc_idx_var = tk.IntVar(value=0)
     self.brightness_var = tk.DoubleVar(value=0.0)
     self.contrast_var = tk.DoubleVar(value=1.0)
-    self.filter_var = tk.StringVar(value='Gaussian')
+    self.filter_var = tk.StringVar(value='None')
     self.strength_var = tk.DoubleVar(value=3.0)
     self.colormap_var = tk.StringVar(value='RdBu_r')
     self.view_var = tk.StringVar(value='IFFT')
@@ -10012,7 +10012,7 @@ def _proc_reset(self):
     self.proc_idx_var.set(max(0, min(self.current_index, len(self.recons) - 1)) if self.recons is not None else 0)
     self.brightness_var.set(0.0)
     self.contrast_var.set(1.0)
-    self.filter_var.set('Gaussian')
+    self.filter_var.set('None')
     self.strength_var.set(3.0)
     self.colormap_var.set('RdBu_r')
     self.view_var.set('IFFT')
@@ -25538,7 +25538,7 @@ CDIWorkflowApp._t7_frame_changed = _t7_frame_changed_dynamic
 def _ensure_tab6_processing_vars(self):
     """Guarantee the variables required by _proc_image/_proc_update exist."""
     if not hasattr(self, 'filter_var'):
-        self.filter_var = tk.StringVar(value='Gaussian')
+        self.filter_var = tk.StringVar(value='None')
     if not hasattr(self, 'strength_var'):
         self.strength_var = tk.DoubleVar(value=3.0)
     if not hasattr(self, 'colormap_var'):

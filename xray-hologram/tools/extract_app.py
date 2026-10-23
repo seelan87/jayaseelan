@@ -6,7 +6,7 @@ project=Path(__file__).resolve().parents[1]
 original=Path(sys.argv[1])
 source=original.read_text(encoding='utf-8')
 original_digest=hashlib.sha256(source.encode()).hexdigest()
-assert original_digest=='4ea1bee46319cea4aa41929c733110525fb52348ba58c11e3f99e21227700fe8'
+assert original_digest=='1c42635c8bbab0fb0a601a4a70d07596fc3a6b01701ae2e3a57ac62ac8161774'
 assert source.count('_gui_event_loop_mode = _run_gui_event_loop(root)')==1
 source=source.replace('_gui_event_loop_mode = _run_gui_event_loop(root)',
     "_gui_event_loop_mode = 'standalone-ready'",1)

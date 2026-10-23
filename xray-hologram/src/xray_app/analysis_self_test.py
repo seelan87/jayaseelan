@@ -42,6 +42,9 @@ def run_analysis_checks(core, app, root, check, output):
         app.roi_height_var.set('1024')
         app.apply_roi_resolution_from_gui()
     check(app.roi_stack.shape == (4, 1024, 1024), 'Selected imaginary ROI is processed at 1024 x 1024')
+    app.filter_var.set('Gaussian')
+    core._proc_reset(app)
+    check(app.filter_var.get() == 'None', 'Tab 6 Reset restores Filter None after a manual filter selection')
     app.real_fields_mT = np.array([88.25, -7.125, 155.5, np.nan])
     check(core._tab9_roi4_fetch_from_tab6(app), 'Processed primary ROI reaches Tab 9')
     bounds = dict(xmin=int(40*1024/129), xmax=int(89*1024/129)-1,
