@@ -9,6 +9,8 @@ def configure_runtime():
     log=logs/'app.log'
     if sys.stdout is None:sys.stdout=log.open('a',encoding='utf-8',buffering=1)
     if sys.stderr is None:sys.stderr=log.open('a',encoding='utf-8',buffering=1)
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'): stream.reconfigure(encoding='utf-8',errors='replace')
     logging.basicConfig(filename=log,level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s',encoding='utf-8')
     os.environ.setdefault('MPLBACKEND','TkAgg')

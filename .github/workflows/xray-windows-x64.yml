@@ -39,7 +39,10 @@ jobs:
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-build.txt
       - name: Test the source application
-        run: python launcher.py --self-test test-results/source.json
+        run: |
+          python tools/extract_app.py notebooks/finalized_2d_analysis_optimized.py
+          python tools/build_notebooks.py notebooks/finalized_2d_analysis_optimized.py release
+          python launcher.py --self-test test-results/source.json
       - name: Build and test both EXE formats
         run: python tools/build_windows.py --mode both
       - name: Upload Windows x64 downloads

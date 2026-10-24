@@ -24,7 +24,7 @@ def run_self_test(report_path):
         dialogs=[]
         originals={name:getattr(messagebox,name) for name in ('showerror','showwarning','showinfo')}
         for name in originals:
-            setattr(messagebox,name,lambda *a,_name=name,**k:dialogs.append((_name,str(a))))
+            setattr(messagebox,name,lambda *a,_name=name,**k:dialogs.append((_name,str(a))) if _name != 'showinfo' else None)
         started=time.perf_counter()
         from xray_app import core
         root,app=core.root,core.app
@@ -93,6 +93,12 @@ def run_self_test(report_path):
             app._tab10_roi4_coords=dict(xmin=0,xmax=80,ymin=0,ymax=80)
             app._tab11_primary_stack=crop[None].copy();app._tab11_primary_ready=True
             app._tab11_scale_nm=(2.,3.);app._tab11_rois=[dict(xmin=0,xmax=80,ymin=0,ymax=80)]
+            app.pixel_cal_active_nm_per_pixel=2.
+            app.primary_roi_final_nm_per_pixel=2.
+            app.recons=app.real_recons=crop[None].copy()
+            app.complex_recons=app.recons.astype(complex)
+            app._native_finalized_snapshot=(crop[None].copy(), (2.,3.), ('self-test',))
+            app._native_finalized_signature=core._native_signature(app)
             app._tab11_center_fixed=True
             center=core._tab10_center(app,crop)
             app._tab10_center_cache=dict(center);app._tab11_centers={0:dict(center)}
@@ -117,6 +123,8 @@ def run_self_test(report_path):
                 im.verify()
             from xray_app.analysis_self_test import run_analysis_checks
             run_analysis_checks(core,app,root,check,tmp)
+            from xray_app.export_self_test import run_export_checks
+            run_export_checks(core,app,root,check,tmp)
             ffmpeg=Path(imageio_ffmpeg.get_ffmpeg_exe())
             check(ffmpeg.is_file(),'FFmpeg is bundled and discoverable')
             with imageio.get_writer(tmp/'movie.mp4',fps=3,format='ffmpeg',macro_block_size=None) as writer:
@@ -140,7 +148,7 @@ def run_self_test(report_path):
             if os.environ.get('XRAY_REQUIRE_GPU')=='1':
                 check(core._compute_gpu is not None,'NVIDIA GPU backend available in packaged app: '+core._compute_gpu_error)
         check(not errors,'No Tk callback failures')
-        check(not dialogs,'No unexpected error or warning dialogs')
+        check(not dialogs,'No unexpected error or warning dialogs: '+repr(dialogs))
         report['passed']=True
         return 0
     except Exception:

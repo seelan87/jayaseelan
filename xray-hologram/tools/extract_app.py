@@ -6,7 +6,7 @@ project=Path(__file__).resolve().parents[1]
 original=Path(sys.argv[1])
 source=original.read_text(encoding='utf-8')
 original_digest=hashlib.sha256(source.encode()).hexdigest()
-assert original_digest=='1c42635c8bbab0fb0a601a4a70d07596fc3a6b01701ae2e3a57ac62ac8161774'
+assert original_digest=='3429f137a8eb353892f6c3ad6e3c7c171c49cab9c6a39468c58b7f548a255ecf'
 assert source.count('_gui_event_loop_mode = _run_gui_event_loop(root)')==1
 source=source.replace('_gui_event_loop_mode = _run_gui_event_loop(root)',
     "_gui_event_loop_mode = 'standalone-ready'",1)
@@ -20,7 +20,7 @@ source=source.replace("for library in ('cuda_runtime', 'cuda_nvrtc', 'cufft'):",
                       "for library in ('cuda_runtime', 'cuda_nvrtc', 'cufft', 'nvjitlink'):",1)
 compile(source,'xray_app/core.py','exec')
 (project/'src/xray_app/core.py').write_text(source,encoding='utf-8')
-provenance={'notebook':'finalized_2d_analysis.ipynb','source_sha256':original_digest,
+provenance={'notebook':'finalized_2d_analysis_readable.ipynb','source_sha256':original_digest,
     'packaged_source_sha256':hashlib.sha256(source.encode()).hexdigest(),
     'adaptations':['Launcher owns Tk mainloop','Discover bundled CUDA DLLs and headers'],
     'platform':'Windows 11 x64','tabs':15}

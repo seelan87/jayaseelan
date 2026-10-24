@@ -61,3 +61,27 @@ py -3.12 -m venv .venv
 ```
 
 Full readable application source: `src/xray_app/core.py`.
+
+## Notebook formats and measurement exports
+
+The download includes `finalized_2d_analysis_readable.ipynb` and
+`finalized_2d_analysis_compressed.ipynb`, both in a single cell, plus readable
+Python source. Both notebooks contain the same verified application source.
+The compressed notebook reduces Jupyter startup overhead; the readable notebook
+shows the complete editable code directly.
+
+Tab 1 offers **EXPORT ALL MEASUREMENT TABLES**. It snapshots stored results,
+calibration, ROI geometry and finalized processing settings without running
+analysis. `Export_Manifest.csv` identifies exported and unavailable tables;
+unresolved values remain unavailable rather than fabricated zeros.
+
+Tab 7 table export includes full-precision Gaussian and endpoint companions.
+Tab 8 table and graph exports include rectangular per-frame, per-particle,
+D-fit particle and all-frame radial-edge CSVs. Tab 11 displays complete scalar
+fit results, covariance, diagnostics and integrated-intensity uncertainties.
+Frame_Index is zero-based; Frame is one-based. Size is nm, area is nm^2,
+1D integrated intensity is a.u. nm, and 2D integrated intensity is a.u. nm^2.
+Intensity provenance distinguishes raw reconstruction from normalized signal.
+
+The GitHub build tests actual export/readback paths before and after freezing.
+No user datasets are included in the repository or application downloads.

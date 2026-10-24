@@ -46,6 +46,8 @@ def run_analysis_checks(core, app, root, check, output):
     core._proc_reset(app)
     check(app.filter_var.get() == 'None', 'Tab 6 Reset restores Filter None after a manual filter selection')
     app.real_fields_mT = np.array([88.25, -7.125, 155.5, np.nan])
+    finalized=core._native_finalize(app)
+    check(finalized, 'Tab 6 source explicitly finalized before downstream analysis: '+app.native_finalize_status_var.get())
     check(core._tab9_roi4_fetch_from_tab6(app), 'Processed primary ROI reaches Tab 9')
     bounds = dict(xmin=int(40*1024/129), xmax=int(89*1024/129)-1,
                   ymin=int(40*1024/129), ymax=int(89*1024/129)-1)

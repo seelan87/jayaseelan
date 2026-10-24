@@ -1,11 +1,11 @@
 {
-  "notebook": "finalized_2d_analysis.ipynb",
-  "source_sha256": "1c42635c8bbab0fb0a601a4a70d07596fc3a6b01701ae2e3a57ac62ac8161774",
-  "packaged_source_sha256": "950aef94f3ccc6d70d5d15ebdb8001c93d0cfff09e17f48e640f0a1f35c923fa",
+  "source_sha256": "3429f137a8eb353892f6c3ad6e3c7c171c49cab9c6a39468c58b7f548a255ecf",
+  "packaged_source_sha256": "a56061d0e12340a15146683effc1dae22e030fa2547fb1a3859d15c2cbeb87e5",
+  "readable_notebook": "finalized_2d_analysis_readable.ipynb",
+  "compressed_notebook": "finalized_2d_analysis_compressed.ipynb",
   "adaptations": [
-    "Launcher owns Tk mainloop",
+    "Launcher owns the Tk event loop",
     "Discover bundled CUDA DLLs and headers"
   ],
-  "platform": "Windows 11 x64",
   "tabs": 15
 }
