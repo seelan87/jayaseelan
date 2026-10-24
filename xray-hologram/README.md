@@ -85,3 +85,5 @@ Intensity provenance distinguishes raw reconstruction from normalized signal.
 
 The GitHub build tests actual export/readback paths before and after freezing.
 No user datasets are included in the repository or application downloads.
+
+The EXE source is extracted from the compressed notebook payload and checksum-verified before packaging. To prepare a source checkout, run the notebook builder and then tools/extract_app.py on release/finalized_2d_analysis_compressed.ipynb before running launcher.py.
