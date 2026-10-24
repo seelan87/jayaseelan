@@ -1,0 +1,64 @@
+name: Build X-Ray Hologram Windows x64
+
+on:
+  push:
+    branches: [master, main, 'codex/xray-windows-x64']
+    paths: ['xray-hologram/**', '.github/workflows/xray-windows-x64.yml']
+  pull_request:
+    paths: ['xray-hologram/**', '.github/workflows/xray-windows-x64.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xray-windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Same-repository pushes already build the exact branch. Avoid running the
+    # large CUDA bundle twice when that branch also has an open pull request.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: xray-hologram
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            xray-hologram/requirements.txt
+            xray-hologram/requirements-build.txt
+            xray-hologram/constraints-win64-py312.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Test the source application
+        run: |
+          python tools/build_notebooks.py notebooks/finalized_2d_analysis_optimized.py release
+          python tools/extract_app.py release/finalized_2d_analysis_compressed.ipynb
+          python launcher.py --self-test test-results/source.json
+      - name: Build and test both EXE formats
+        run: python tools/build_windows.py --mode both
+      - name: Upload Windows x64 downloads
+        uses: actions/upload-artifact@v7
+        with:
+          name: XRay-Hologram-Windows-x64
+          path: xray-hologram/release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: XRay-Hologram-test-reports
+          path: |
+            xray-hologram/test-results/*.json
+            xray-hologram/build/**/warn-*.txt
+          if-no-files-found: warn

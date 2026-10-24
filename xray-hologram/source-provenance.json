@@ -1,0 +1,12 @@
+{
+  "notebook": "finalized_2d_analysis_compressed.ipynb",
+  "notebook_sha256": "b81365b1de05b5b8f756a72933c94aa8c225aad340d6731d409e1da2f2409c88",
+  "source_format": "compressed single-cell notebook; statically decoded, verified payload",
+  "source_sha256": "3429f137a8eb353892f6c3ad6e3c7c171c49cab9c6a39468c58b7f548a255ecf",
+  "packaged_source_sha256": "a56061d0e12340a15146683effc1dae22e030fa2547fb1a3859d15c2cbeb87e5",
+  "adaptations": [
+    "Launcher owns Tk mainloop",
+    "Discover bundled CUDA DLLs and headers"
+  ],
+  "tabs": 15
+}

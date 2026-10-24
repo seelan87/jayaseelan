@@ -1,0 +1,95 @@
+name: Retrieve verified XRay build in smaller parts
+
+on:
+  push:
+    branches: ['codex/xray-windows-x64']
+    paths: ['.github/workflows/xray-download-parts.yml']
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  split-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download and verify the completed compressed-notebook build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import hashlib,json,os,urllib.request,urllib.error
+          from pathlib import Path
+          expected='2a88bb6a5fcd6fb23f5a1e54e503309c226d35cb21ef44e5ef2018217a3a5e0f'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  return None
+          request=urllib.request.Request('https://api.github.com/repos/seelan87/jayaseelan/actions/artifacts/12552316796/zip',
+              headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'User-Agent':'XRay-build-transfer'})
+          try:
+              response=urllib.request.build_opener(NoRedirect()).open(request,timeout=90)
+          except urllib.error.HTTPError as error:
+              if error.code!=302: raise
+              # The signed storage request must not contain a GitHub token.
+              response=urllib.request.urlopen(error.headers['Location'],timeout=90)
+          digest=hashlib.sha256()
+          with response,open('build.zip','wb') as target:
+              while chunk:=response.read(8*1024*1024):
+                  target.write(chunk);digest.update(chunk)
+          assert digest.hexdigest()==expected,'Original GitHub artifact checksum mismatch'
+          parts=[]
+          with open('build.zip','rb') as source:
+              number=0
+              while data:=source.read(192*1024*1024):
+                  number+=1
+                  name=f'build.zip.part{number:02d}'
+                  Path(name).write_bytes(data)
+                  parts.append(dict(file=name,size=len(data),sha256=hashlib.sha256(data).hexdigest()))
+          assert len(parts)==6
+          Path('download-index.json').write_text(json.dumps(dict(
+              artifact_sha256=expected,original_artifact_id=12552316796,original_run_id=40072894095,
+              source_commit='68e162ecc5cdbb0d0f581beed7cff257e735506a',parts=parts),indent=2))
+          print('Verified original artifact and prepared',len(parts),'download parts.')
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part01
+          path: build.zip.part01
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part02
+          path: build.zip.part02
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part03
+          path: build.zip.part03
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part04
+          path: build.zip.part04
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part05
+          path: build.zip.part05
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-part06
+          path: build.zip.part06
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: XRay-download-index
+          path: download-index.json
+          retention-days: 7

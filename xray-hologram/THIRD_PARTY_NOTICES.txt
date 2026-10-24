@@ -1,0 +1,16 @@
+This distribution includes unmodified third-party runtime libraries.
+Their license files and package metadata are included in the bundled runtime.
+
+Python: Python Software Foundation License, https://docs.python.org/3/license.html
+Tcl/Tk: Tcl/Tk license, https://www.tcl.tk/software/tcltk/license.html
+NumPy, SciPy, pandas, scikit-image, h5py: respective BSD-style licenses.
+Matplotlib: Matplotlib license, https://matplotlib.org/stable/project/license.html
+Pillow: HPND license, https://pillow.readthedocs.io/en/stable/about.html#license
+ImageIO and imageio-ffmpeg: BSD-2-Clause licenses.
+The bundled FFmpeg executable is provided by imageio-ffmpeg; see its bundled
+metadata and https://github.com/imageio/imageio-ffmpeg for build and license details.
+CuPy: MIT License, https://github.com/cupy/cupy/blob/main/LICENSE
+fastrlock: BSD-3-Clause license.
+NVIDIA CUDA runtime, NVRTC, and cuFFT redistributables: NVIDIA CUDA EULA,
+https://docs.nvidia.com/cuda/eula/index.html
+NVIDIA driver software is not redistributed.
